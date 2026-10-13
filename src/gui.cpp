@@ -53,6 +53,8 @@
 #define IDC_BTN_ADD_SP50      1039
 #define IDC_BTN_ADD_STATS     1040
 #define IDC_BTN_ADD_XP        1041
+#define IDC_BTN_TELEPORT      1042
+#define IDC_BTN_GOD           1043
 
 #define IDC_GRP_CMD           1050
 #define IDC_EDIT_CMD          1051
@@ -64,6 +66,8 @@
 #define IDC_BTN_OPEN_TRACE    1063
 #define IDC_BTN_OPEN_SAVE     1064
 #define IDC_BTN_OPEN_PANEL    1065
+#define IDC_BTN_COPY_LOG      1066
+#define IDC_CHK_AUTO_SCROLL   1067
 
 #define IDT_TIMER_STATUS      1
 
@@ -79,6 +83,7 @@ HWND g_hEditPercent = NULL;
 HWND g_hLblWar3 = NULL;
 HWND g_hLblPipe = NULL;
 HWND g_hChkAutoInject = NULL;
+HWND g_hChkAutoScroll = NULL;
 HWND g_hBtnAntiOver = NULL;
 
 HFONT g_hFont = NULL;
@@ -89,11 +94,16 @@ WNDPROC g_oldEditCmdProc = NULL;
 WNDPROC g_oldEditValProc = NULL;
 
 HANDLE g_hPipe = INVALID_HANDLE_VALUE;
+CRITICAL_SECTION g_pipeCs;
+HANDLE g_hPipeReaderThread = NULL;
+bool g_runPipeReader = true;
+std::string g_pipeLogBuffer = "";
+
 DWORD g_lastDetectedPid = 0;
 bool g_isDllInjected = false;
 bool g_antiOverEnabled = true;
 
-// Utility: Append to log window with timestamp
+// Utility: Append to log window with timestamp and optional auto-scroll
 void AppendLog(const std::wstring& msg) {
     if (!g_hEditLog) return;
     
@@ -107,9 +117,46 @@ void AppendLog(const std::wstring& msg) {
     std::wstring line = timeStr + msg + L"\r\n";
     
     int len = GetWindowTextLengthW(g_hEditLog);
+    if (len > 300000) {
+        SendMessageW(g_hEditLog, EM_SETSEL, 0, 80000);
+        SendMessageW(g_hEditLog, EM_REPLACESEL, FALSE, (LPARAM)L"");
+        len = GetWindowTextLengthW(g_hEditLog);
+    }
     SendMessageW(g_hEditLog, EM_SETSEL, (WPARAM)len, (LPARAM)len);
     SendMessageW(g_hEditLog, EM_REPLACESEL, FALSE, (LPARAM)line.c_str());
-    SendMessageW(g_hEditLog, EM_SCROLLCARET, 0, 0);
+    
+    bool autoScroll = true;
+    if (g_hChkAutoScroll) {
+        autoScroll = (SendMessage(g_hChkAutoScroll, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    }
+    if (autoScroll) {
+        SendMessageW(g_hEditLog, EM_SCROLLCARET, 0, 0);
+    }
+}
+
+// Utility: Copy log text to Windows Clipboard
+void CopyLogToClipboard() {
+    if (!g_hEditLog) return;
+    int len = GetWindowTextLengthW(g_hEditLog);
+    if (len == 0) return;
+    
+    std::wstring text(len + 1, L'\0');
+    GetWindowTextW(g_hEditLog, &text[0], len + 1);
+    
+    if (OpenClipboard(g_hWnd)) {
+        EmptyClipboard();
+        HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, (len + 1) * sizeof(wchar_t));
+        if (hGlob) {
+            void* pMem = GlobalLock(hGlob);
+            if (pMem) {
+                memcpy(pMem, text.c_str(), (len + 1) * sizeof(wchar_t));
+                GlobalUnlock(hGlob);
+                SetClipboardData(CF_UNICODETEXT, hGlob);
+            }
+        }
+        CloseClipboard();
+        AppendLog(L"[系統] 已將日誌內容成功複製至剪貼簿！");
+    }
 }
 
 // Utility: Get directory of current executable
@@ -237,36 +284,95 @@ bool InjectDLL(DWORD processID, const std::string& dllPath, std::wstring& errOut
     return true;
 }
 
-// Named Pipe IPC Communication
+// Named Pipe IPC Communication with CriticalSection Thread Safety
 bool ConnectPipe() {
+    EnterCriticalSection(&g_pipeCs);
     if (g_hPipe != INVALID_HANDLE_VALUE) {
+        LeaveCriticalSection(&g_pipeCs);
         return true;
     }
     g_hPipe = CreateFileA(
         "\\\\.\\pipe\\War3JassDevTool",
         GENERIC_READ | GENERIC_WRITE,
         0, NULL, OPEN_EXISTING, 0, NULL);
-    return (g_hPipe != INVALID_HANDLE_VALUE);
+    bool ok = (g_hPipe != INVALID_HANDLE_VALUE);
+    LeaveCriticalSection(&g_pipeCs);
+    return ok;
 }
 
 void DisconnectPipe() {
+    EnterCriticalSection(&g_pipeCs);
     if (g_hPipe != INVALID_HANDLE_VALUE) {
         CloseHandle(g_hPipe);
         g_hPipe = INVALID_HANDLE_VALUE;
     }
+    LeaveCriticalSection(&g_pipeCs);
 }
 
 bool SendPipeCommand(const std::string& cmd) {
     if (!ConnectPipe()) {
         return false;
     }
+    EnterCriticalSection(&g_pipeCs);
+    if (g_hPipe == INVALID_HANDLE_VALUE) {
+        LeaveCriticalSection(&g_pipeCs);
+        return false;
+    }
     DWORD bw;
     BOOL ok = WriteFile(g_hPipe, cmd.c_str(), (DWORD)cmd.length(), &bw, NULL);
     if (!ok) {
-        DisconnectPipe();
+        CloseHandle(g_hPipe);
+        g_hPipe = INVALID_HANDLE_VALUE;
+        LeaveCriticalSection(&g_pipeCs);
         return false;
     }
+    LeaveCriticalSection(&g_pipeCs);
     return true;
+}
+
+// Background Live Monitor Streaming Thread
+DWORD WINAPI PipeLogReaderThread(LPVOID lpParam) {
+    while (g_runPipeReader) {
+        bool hasData = false;
+        DWORD bytesAvail = 0;
+
+        EnterCriticalSection(&g_pipeCs);
+        if (g_hPipe != INVALID_HANDLE_VALUE) {
+            if (PeekNamedPipe(g_hPipe, NULL, 0, NULL, &bytesAvail, NULL) && bytesAvail > 0) {
+                hasData = true;
+            }
+        }
+        LeaveCriticalSection(&g_pipeCs);
+
+        if (hasData) {
+            char chunk[4096];
+            DWORD toRead = (bytesAvail < sizeof(chunk) - 1) ? bytesAvail : (sizeof(chunk) - 1);
+            DWORD bytesRead = 0;
+
+            EnterCriticalSection(&g_pipeCs);
+            BOOL ok = (g_hPipe != INVALID_HANDLE_VALUE) && ReadFile(g_hPipe, chunk, toRead, &bytesRead, NULL);
+            LeaveCriticalSection(&g_pipeCs);
+
+            if (ok && bytesRead > 0) {
+                chunk[bytesRead] = '\0';
+                g_pipeLogBuffer.append(chunk, bytesRead);
+                size_t nl;
+                while ((nl = g_pipeLogBuffer.find('\n')) != std::string::npos) {
+                    std::string line = g_pipeLogBuffer.substr(0, nl);
+                    g_pipeLogBuffer.erase(0, nl + 1);
+                    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+                        line.pop_back();
+                    }
+                    if (!line.empty()) {
+                        AppendLog(Utf8ToWide(line));
+                    }
+                }
+            }
+        } else {
+            Sleep(35);
+        }
+    }
+    return 0;
 }
 
 // Execute Inject Action
@@ -442,6 +548,12 @@ void ProcessCustomCommand(const std::string& inputCmd) {
     }
     else if (cmd == "!heal") {
         cmd = "HEAL";
+    }
+    else if (cmd == "!tp" || cmd == "!blink" || cmd == "!teleport") {
+        cmd = "TELEPORT";
+    }
+    else if (cmd == "!god" || cmd == "!invul" || cmd == "!wudi") {
+        cmd = "GOD";
     }
     else if (cmd.rfind("!sp ", 0) == 0) {
         cmd = "ADD_SP:" + cmd.substr(4);
@@ -648,6 +760,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             }
             break;
 
+        case IDC_BTN_TELEPORT:
+            if (SendPipeCommand("TELEPORT")) {
+                AppendLog(L"[英雄] 瞬移選中單位至滑鼠地形座標 (TELEPORT / Ctrl+M)");
+            }
+            break;
+
+        case IDC_BTN_GOD:
+            if (SendPipeCommand("GOD")) {
+                AppendLog(L"[英雄] 已將選中單位設為官方無敵 (God Mode / Ctrl+G，生命值鎖定10億)");
+            }
+            break;
+
         case IDC_BTN_KILL:
             if (SendPipeCommand("KILL")) {
                 AppendLog(L"[動作] 已秒殺選取/滑鼠懸停目標單位 (KILL)！");
@@ -719,6 +843,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             AppendLog(L"[*] 日誌已清除。");
             break;
 
+        case IDC_BTN_COPY_LOG:
+            CopyLogToClipboard();
+            break;
+
         case IDC_BTN_OPEN_TRACE: {
             std::string p = GetExeDir() + "dztrace.log";
             ShellExecuteA(hWnd, "open", "notepad.exe", p.c_str(), NULL, SW_SHOWNORMAL);
@@ -741,8 +869,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_DESTROY:
+        g_runPipeReader = false;
         KillTimer(hWnd, IDT_TIMER_STATUS);
         DisconnectPipe();
+        if (g_hPipeReaderThread) {
+            WaitForSingleObject(g_hPipeReaderThread, 300);
+            CloseHandle(g_hPipeReaderThread);
+            g_hPipeReaderThread = NULL;
+        }
+        DeleteCriticalSection(&g_pipeCs);
         if (g_hFont) DeleteObject(g_hFont);
         if (g_hFontBold) DeleteObject(g_hFontBold);
         if (g_hLogBrush) DeleteObject(g_hLogBrush);
@@ -759,6 +894,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     SetProcessDPIAware();
     EnableDebugPrivilege();
+    InitializeCriticalSection(&g_pipeCs);
 
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
@@ -777,7 +913,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     RegisterClassExW(&wcex);
 
     int winWidth = 840;
-    int winHeight = 840;
+    int winHeight = 900;
     int screenW = GetSystemMetrics(SM_CXSCREEN);
     int screenH = GetSystemMetrics(SM_CYSCREEN);
     int posX = (screenW - winWidth) / 2;
@@ -858,34 +994,42 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     CreateCtrl(L"BUTTON", L"設定百分比 (模式3)", BS_PUSHBUTTON, 495, 287, 140, 26, IDC_BTN_SET_PERCENT);
 
     // ==========================================
-    // 4. 英雄與選取單位增強 (Hero Manipulation)
+    // 4. 英雄與選取單位增強 (瞬移 / 無敵 / 屬性)
     // ==========================================
-    CreateCtrl(L"BUTTON", L"【英雄與選取單位增強 (DzAPI 記憶體逆向)】", BS_GROUPBOX, 15, 328, 790, 68, IDC_GRP_HERO);
-    CreateCtrl(L"BUTTON", L"❤️ 生命全滿 (HEAL)", BS_PUSHBUTTON, 30, 353, 125, 28, IDC_BTN_HEAL);
-    CreateCtrl(L"BUTTON", L"💀 秒殺目標 (KILL)", BS_PUSHBUTTON, 162, 353, 125, 28, IDC_BTN_KILL);
-    CreateCtrl(L"BUTTON", L"🌟 技能點 +10", BS_PUSHBUTTON, 294, 353, 115, 28, IDC_BTN_ADD_SP10);
-    CreateCtrl(L"BUTTON", L"🌟 技能點 +50", BS_PUSHBUTTON, 416, 353, 115, 28, IDC_BTN_ADD_SP50);
-    CreateCtrl(L"BUTTON", L"💪 全屬性 +500", BS_PUSHBUTTON, 538, 353, 120, 28, IDC_BTN_ADD_STATS);
-    CreateCtrl(L"BUTTON", L"📖 經驗 +10000", BS_PUSHBUTTON, 665, 353, 120, 28, IDC_BTN_ADD_XP);
+    CreateCtrl(L"BUTTON", L"【英雄與選取單位增強 (支援遊戲內熱鍵 Ctrl+M / Ctrl+G / Ctrl+H / Ctrl+K)】", BS_GROUPBOX, 15, 328, 790, 106, IDC_GRP_HERO);
+    // 第一行: 瞬移、無敵、滿血、秒殺
+    CreateCtrl(L"BUTTON", L"🌀 瞬移至滑鼠 (Ctrl+M)", BS_PUSHBUTTON, 30, 355, 180, 30, IDC_BTN_TELEPORT);
+    CreateCtrl(L"BUTTON", L"🛡️ 設為無敵 (Ctrl+G)", BS_PUSHBUTTON, 220, 355, 175, 30, IDC_BTN_GOD);
+    CreateCtrl(L"BUTTON", L"❤️ 生命全滿 (Ctrl+H)", BS_PUSHBUTTON, 405, 355, 185, 30, IDC_BTN_HEAL);
+    CreateCtrl(L"BUTTON", L"💀 秒殺目標 (Ctrl+K)", BS_PUSHBUTTON, 600, 355, 185, 30, IDC_BTN_KILL);
+    // 第二行: 技能點、屬性、經驗
+    CreateCtrl(L"BUTTON", L"🌟 技能點 +10", BS_PUSHBUTTON, 30, 393, 180, 28, IDC_BTN_ADD_SP10);
+    CreateCtrl(L"BUTTON", L"🌟 技能點 +50", BS_PUSHBUTTON, 220, 393, 175, 28, IDC_BTN_ADD_SP50);
+    CreateCtrl(L"BUTTON", L"💪 全屬性 +500", BS_PUSHBUTTON, 405, 393, 185, 28, IDC_BTN_ADD_STATS);
+    CreateCtrl(L"BUTTON", L"📖 經驗 +10000", BS_PUSHBUTTON, 600, 393, 185, 28, IDC_BTN_ADD_XP);
 
     // ==========================================
     // 5. 自訂指令輸入 (Command Input)
     // ==========================================
-    CreateCtrl(L"BUTTON", L"【自訂指令與 Native 呼叫】", BS_GROUPBOX, 15, 404, 790, 70, IDC_GRP_CMD);
-    g_hEditCmd = CreateCtrl(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, 30, 430, 630, 28, IDC_EDIT_CMD);
-    CreateCtrl(L"BUTTON", L"發送指令 (Enter)", BS_PUSHBUTTON, 670, 429, 120, 30, IDC_BTN_SEND_CMD);
+    CreateCtrl(L"BUTTON", L"【自訂指令與 Native 呼叫】", BS_GROUPBOX, 15, 444, 790, 68, IDC_GRP_CMD);
+    g_hEditCmd = CreateCtrl(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, 30, 468, 630, 28, IDC_EDIT_CMD);
+    CreateCtrl(L"BUTTON", L"發送指令 (Enter)", BS_PUSHBUTTON, 670, 467, 120, 30, IDC_BTN_SEND_CMD);
 
     // ==========================================
-    // 6. 即時控制台日誌 (Console Logs)
+    // 6. 即時系統日誌與 JASS / DzAPI 即時監控串流
     // ==========================================
-    CreateCtrl(L"BUTTON", L"【即時系統日誌與輸出】", BS_GROUPBOX, 15, 482, 790, 305, IDC_GRP_LOG);
+    CreateCtrl(L"BUTTON", L"【即時系統日誌與 JASS / DzAPI 監控串流】", BS_GROUPBOX, 15, 520, 790, 325, IDC_GRP_LOG);
     g_hEditLog = CreateCtrl(L"EDIT", L"", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
-                            30, 507, 760, 235, IDC_EDIT_LOG);
+                            30, 545, 760, 255, IDC_EDIT_LOG);
 
-    CreateCtrl(L"BUTTON", L"🧹 清除日誌", BS_PUSHBUTTON, 30, 748, 110, 28, IDC_BTN_CLEAR_LOG);
-    CreateCtrl(L"BUTTON", L"📄 開啟 dztrace.log", BS_PUSHBUTTON, 150, 748, 140, 28, IDC_BTN_OPEN_TRACE);
-    CreateCtrl(L"BUTTON", L"📂 開啟 local_save.txt", BS_PUSHBUTTON, 300, 748, 150, 28, IDC_BTN_OPEN_SAVE);
-    CreateCtrl(L"BUTTON", L"📝 開啟 save_panel.txt", BS_PUSHBUTTON, 460, 748, 150, 28, IDC_BTN_OPEN_PANEL);
+    CreateCtrl(L"BUTTON", L"🧹 清除日誌", BS_PUSHBUTTON, 30, 807, 100, 28, IDC_BTN_CLEAR_LOG);
+    CreateCtrl(L"BUTTON", L"📋 複製日誌", BS_PUSHBUTTON, 138, 807, 100, 28, IDC_BTN_COPY_LOG);
+    g_hChkAutoScroll = CreateCtrl(L"BUTTON", L"自動滾動", BS_AUTOCHECKBOX, 248, 809, 85, 24, IDC_CHK_AUTO_SCROLL);
+    SendMessage(g_hChkAutoScroll, BM_SETCHECK, BST_CHECKED, 0);
+
+    CreateCtrl(L"BUTTON", L"📄 dztrace.log", BS_PUSHBUTTON, 343, 807, 135, 28, IDC_BTN_OPEN_TRACE);
+    CreateCtrl(L"BUTTON", L"📂 local_save.txt", BS_PUSHBUTTON, 488, 807, 145, 28, IDC_BTN_OPEN_SAVE);
+    CreateCtrl(L"BUTTON", L"📝 save_panel.txt", BS_PUSHBUTTON, 643, 807, 147, 28, IDC_BTN_OPEN_PANEL);
 
     // Subclass Edit Controls for Enter key
     g_oldEditCmdProc = (WNDPROC)SetWindowLongPtr(g_hEditCmd, GWLP_WNDPROC, (LONG_PTR)EditCmdSubclassProc);
@@ -894,10 +1038,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ShowWindow(g_hWnd, nCmdShow);
     UpdateWindow(g_hWnd);
 
-    AppendLog(L"=== Warcraft III JassHook 開發者輔助工具 v2.0 (增強版) 啟動完成 ===");
+    AppendLog(L"=== Warcraft III JassHook 開發者輔助控制台 v2.0 (增強版) 啟動完成 ===");
     AppendLog(L"[*] 系統已具備 SeDebugPrivilege 管理員除錯權限。");
-    AppendLog(L"[*] 根據 DzAPI 逆向報告已啟用: 平台至尊VIP、英雄屬性/技能點修改、防結算失敗、商城全開。");
-    AppendLog(L"[*] 支援指令: !heal, !sp <點數>, !stats <屬性>, !xp <經驗>, !vip <0-2>, !panel, !saveall, !mall <0-3>, !kill");
+    AppendLog(L"[*] 記憶體瞬移與無敵已就緒: 瞬移至滑鼠 (Ctrl+M)、無敵神模式 (Ctrl+G)、滿血 (Ctrl+H)、秒殺 (Ctrl+K)。");
+    AppendLog(L"[*] DzAPI 即時監控串流已啟用: 平台特權、商城偽造、伺服器存檔讀寫均即時串流於此。");
+    AppendLog(L"[*] 支援指令: !tp, !god, !heal, !kill, !sp <點數>, !stats <屬性>, !xp <經驗>, !vip <0-2>, !panel, !saveall, !mall <0-3>");
+
+    // 啟動背景 Named Pipe 日誌串流監聽線程
+    g_hPipeReaderThread = CreateThread(NULL, 0, PipeLogReaderThread, NULL, 0, NULL);
 
     SendMessage(g_hWnd, WM_TIMER, IDT_TIMER_STATUS, 0);
 

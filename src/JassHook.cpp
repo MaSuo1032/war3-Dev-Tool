@@ -31,6 +31,7 @@ int g_nativeCount = 0;
 
 HWND g_gameHwnd = NULL;
 WNDPROC OriginalWndProc = NULL;
+HANDLE g_activePipe = INVALID_HANDLE_VALUE;
 
 void ConsoleLog(const char* msg) {
     OutputDebugStringA(msg);
@@ -38,6 +39,14 @@ void ConsoleLog(const char* msg) {
     if (hConsole && hConsole != INVALID_HANDLE_VALUE) {
         DWORD w;
         WriteConsoleA(hConsole, msg, (DWORD)strlen(msg), &w, NULL);
+    }
+    
+    // Real-time bidirectional streaming to connected DevTool UI / CLI
+    if (g_activePipe != INVALID_HANDLE_VALUE) {
+        DWORD bw;
+        if (!WriteFile(g_activePipe, msg, (DWORD)strlen(msg), &bw, NULL)) {
+            g_activePipe = INVALID_HANDLE_VALUE;
+        }
     }
     
     // Also save to a log file in the game directory
@@ -49,6 +58,7 @@ void ConsoleLog(const char* msg) {
         fclose(fp);
     }
 }
+
 
 std::unordered_set<std::string> g_mallWhitelist;
 
@@ -686,6 +696,80 @@ void HandleHeroAction(int action, int param) {
             sprintf_s(log, sizeof(log), "[HeroAction] Added %d XP! (Total: %d)\n", param, *pXp);
             ConsoleLog(log);
         }
+
+        // Action 6: Teleport Selected Unit to Mouse Position (CWidget::SetCoord @ Game.dll + 0x635DE0)
+        if (action == 6) {
+            HMODULE hPlugin = GetModuleHandleA("War3Plugin.dll");
+            if (!hPlugin) {
+                ConsoleLog("[Teleport] War3Plugin.dll not ready!\n");
+                return;
+            }
+            float mouseX = *(float*)((BYTE*)hPlugin + 0x2656D8);
+            float mouseY = *(float*)((BYTE*)hPlugin + 0x2656DC);
+            if (mouseX == 0.0f && mouseY == 0.0f) {
+                ConsoleLog("[Teleport] Mouse cursor is outside map or terrain coords not ready.\n");
+                return;
+            }
+            DWORD fnSetCoord = gameBase + 0x635DE0;
+            __try {
+                __asm {
+                    mov ecx, targetUnit
+                    push 0
+                    push -1
+                    push 0
+                    push 0
+                    push 0
+                    push 0
+                    push -1
+                    push 1
+                    push 1
+                    lea eax, mouseY
+                    push eax
+                    lea eax, mouseX
+                    push eax
+                    call fnSetCoord
+                }
+                char log[128];
+                sprintf_s(log, sizeof(log), "[Teleport] Teleported unit to mouse position: (X: %.1f, Y: %.1f)!\n", mouseX, mouseY);
+                ConsoleLog(log);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                ConsoleLog("[Teleport] Exception caught during CWidget::SetCoord.\n");
+            }
+            return;
+        }
+
+        // Action 7: Make Unit Invulnerable (God Mode - Official ability + 1 Billion HP)
+        if (action == 7) {
+            // 1. Call Game.dll CGameState::SetUnitInvulnerable(BOOL flag, CUnit* unit) @ 0x210CB0
+            DWORD pGameWar3 = *(DWORD*)(gameBase + 0xBE4238);
+            if (pGameWar3) {
+                DWORD gameState = *(DWORD*)(pGameWar3 + 0x1C);
+                if (gameState) {
+                    typedef void(__thiscall *SetUnitInvul_t)(DWORD thisPtr, BOOL flag, DWORD unit);
+                    SetUnitInvul_t fnSetInvul = (SetUnitInvul_t)(gameBase + 0x210CB0);
+                    fnSetInvul(gameState, TRUE, targetUnit);
+                }
+            }
+
+            // 2. Maximize and lock HP to 999,999,999.0f
+            DWORD hpIndex = *(DWORD*)(targetUnit + 0xA0);
+            DWORD thisGame = *(DWORD*)(gameBase + 0xBE40A8);
+            if (thisGame) {
+                DWORD gameMemory = *(DWORD*)(thisGame + 0x0C);
+                if (gameMemory) {
+                    DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
+                    DWORD address1 = *(DWORD*)entryAddress;
+                    if (address1) {
+                        float* maxHp = (float*)(address1 + 0x74);
+                        float* hpValue = (float*)(address1 + 0x78);
+                        *maxHp = 999999999.0f;
+                        *hpValue = 999999999.0f;
+                    }
+                }
+            }
+            ConsoleLog("[HeroAction] Target unit is now officially INVULNERABLE (God Mode Active)!\n");
+            return;
+        }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         ConsoleLog("[HeroAction] Exception caught during hero manipulation.\n");
     }
@@ -693,6 +777,29 @@ void HandleHeroAction(int action, int param) {
 
 // -- Main Thread Execution via WndProc Hook --
 LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    // In-game Hotkeys (Ctrl + M: Teleport, Ctrl + G: God Mode, Ctrl + H: Heal, Ctrl + K: Kill)
+    if (uMsg == WM_KEYDOWN) {
+        bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        if (ctrlDown) {
+            if (wParam == 'M') {
+                HandleHeroAction(6, 0); // Ctrl+M: Teleport to mouse
+                return 0;
+            }
+            else if (wParam == 'G') {
+                HandleHeroAction(7, 0); // Ctrl+G: God Mode (Invulnerable)
+                return 0;
+            }
+            else if (wParam == 'H') {
+                HandleHeroAction(2, 0); // Ctrl+H: Heal
+                return 0;
+            }
+            else if (wParam == 'K') {
+                HandleHeroAction(1, 0); // Ctrl+K: Kill
+                return 0;
+            }
+        }
+    }
+
     if (uMsg == WM_APP + 2) {
         HandleHeroAction(1, 0); // Kill
         return 0;
@@ -702,6 +809,7 @@ LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
         HandleHeroAction((int)wParam, (int)lParam);
         return 0;
     }
+
 
     
     if (uMsg == WM_APP + 3) {
@@ -780,7 +888,7 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam) {
             "\\\\.\\pipe\\War3JassDevTool",
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-            1, 1024, 1024, 0, NULL);
+            1, 65536, 65536, 0, NULL);
         
         if (hPipe == INVALID_HANDLE_VALUE) {
             Sleep(1000);
@@ -789,9 +897,25 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam) {
 
         bool connected = ConnectNamedPipe(hPipe, NULL) ? true : (GetLastError() == ERROR_PIPE_CONNECTED);
         if (connected) {
-            char buffer[1024];
-            DWORD bytesRead;
-            while (ReadFile(hPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL)) {
+            g_activePipe = hPipe;
+            ConsoleLog("[IPC] DevTool UI client connected to Named Pipe successfully.\n");
+            
+            while (g_activePipe != INVALID_HANDLE_VALUE) {
+                DWORD bytesAvail = 0;
+                if (!PeekNamedPipe(hPipe, NULL, 0, NULL, &bytesAvail, NULL)) {
+                    break;
+                }
+                
+                if (bytesAvail == 0) {
+                    Sleep(20);
+                    continue;
+                }
+                
+                char buffer[1024];
+                DWORD bytesRead = 0;
+                if (!ReadFile(hPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL) || bytesRead == 0) {
+                    break;
+                }
                 buffer[bytesRead] = '\0';
                 
                 if (strncmp(buffer, "KILL", 4) == 0) {
@@ -802,6 +926,16 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam) {
                 else if (strncmp(buffer, "HEAL", 4) == 0) {
                     if (g_gameHwnd) {
                         SendMessageA(g_gameHwnd, WM_APP + 4, 2, 0); // Action 2 = Heal (Full HP)
+                    }
+                }
+                else if (strncmp(buffer, "TELEPORT", 8) == 0 || strncmp(buffer, "BLINK", 5) == 0) {
+                    if (g_gameHwnd) {
+                        SendMessageA(g_gameHwnd, WM_APP + 4, 6, 0); // Action 6 = Teleport to mouse
+                    }
+                }
+                else if (strncmp(buffer, "GOD", 3) == 0 || strncmp(buffer, "INVUL", 5) == 0) {
+                    if (g_gameHwnd) {
+                        SendMessageA(g_gameHwnd, WM_APP + 4, 7, 0); // Action 7 = Invulnerable (God Mode)
                     }
                 }
                 else if (strncmp(buffer, "ADD_SP:", 7) == 0) {
@@ -916,8 +1050,9 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam) {
                     }
                 }
             }
+            g_activePipe = INVALID_HANDLE_VALUE;
+            DisconnectNamedPipe(hPipe);
         }
-        DisconnectNamedPipe(hPipe);
         CloseHandle(hPipe);
     }
     return 0;

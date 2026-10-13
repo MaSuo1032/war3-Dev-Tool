@@ -20,16 +20,47 @@ void PrintMenu() {
     std::cout << "  !level <等級>     : 動態偽造地圖等級 (例: !level 99)\n";
     std::cout << "  !vip <0|1|2>      : 動態切換平台 VIP 等級 (2=至尊VIP，解鎖翅膀光環特權)\n";
     std::cout << "  !antiover <0|1>   : 切換防作弊遊戲失敗/結算阻擋保護 (1=開啟, 0=關閉)\n\n";
-    std::cout << " [英雄與單位增強 (根據 DzAPI 記憶體逆向)]\n";
-    std::cout << "  !heal             : 補滿當前選取/滑鼠懸停單位的生命值\n";
+    std::cout << " [英雄與單位增強 (瞬移 / 無敵 / 屬性)]\n";
+    std::cout << "  !tp / !blink      : 瞬移選取/滑鼠懸停單位至滑鼠地形座標 (遊戲內熱鍵: Ctrl+M)\n";
+    std::cout << "  !god / !invul     : 將選取單位設為官方無敵 (God Mode，生命值鎖定10億) (遊戲內熱鍵: Ctrl+G)\n";
+    std::cout << "  !heal             : 補滿當前選取/滑鼠懸停單位的生命值 (遊戲內熱鍵: Ctrl+H)\n";
+    std::cout << "  !kill             : 秒殺當前選取/滑鼠懸停的單位 (HP歸零) (遊戲內熱鍵: Ctrl+K)\n";
     std::cout << "  !sp <數量>        : 為目標英雄增加技能點 (例: !sp 50)\n";
     std::cout << "  !stats <數量>     : 為目標英雄增加力量與敏捷 (例: !stats 500)\n";
-    std::cout << "  !xp <數量>        : 為目標英雄增加經驗值 (例: !xp 10000)\n";
-    std::cout << "  !kill             : 秒殺當前選取/滑鼠懸停的單位 (HP歸零)\n\n";
+    std::cout << "  !xp <數量>        : 為目標英雄增加經驗值 (例: !xp 10000)\n\n";
     std::cout << " [動態 Native 呼叫]\n";
     std::cout << "  !<Native名稱> <參數1> <參數2> ... (例: !SuicideUnit 123 456)\n";
     std::cout << "  !help             : 重新顯示此選單\n";
     std::cout << "========================================================\n";
+}
+
+DWORD WINAPI CliPipeReader(LPVOID lpParam) {
+    HANDLE hPipe = (HANDLE)lpParam;
+    std::string lineBuf = "";
+    while (true) {
+        DWORD bytesAvail = 0;
+        if (PeekNamedPipe(hPipe, NULL, 0, NULL, &bytesAvail, NULL) && bytesAvail > 0) {
+            char chunk[2048];
+            DWORD toRead = (bytesAvail < sizeof(chunk) - 1) ? bytesAvail : (sizeof(chunk) - 1);
+            DWORD bytesRead = 0;
+            if (ReadFile(hPipe, chunk, toRead, &bytesRead, NULL) && bytesRead > 0) {
+                chunk[bytesRead] = '\0';
+                lineBuf.append(chunk, bytesRead);
+                size_t nl;
+                while ((nl = lineBuf.find('\n')) != std::string::npos) {
+                    std::string line = lineBuf.substr(0, nl);
+                    lineBuf.erase(0, nl + 1);
+                    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+                    if (!line.empty()) {
+                        std::cout << "\n[MONITOR] " << line << "\n> " << std::flush;
+                    }
+                }
+            }
+        } else {
+            Sleep(50);
+        }
+    }
+    return 0;
 }
 
 int main() {
@@ -54,7 +85,8 @@ int main() {
         Sleep(2000);
     }
     
-    std::cout << "[IPC] 已成功連線至魔獸爭霸！\n";
+    std::cout << "[IPC] 已成功連線至魔獸爭霸！(已啟用即時 DzAPI 監控串流)\n";
+    CreateThread(NULL, 0, CliPipeReader, (LPVOID)hPipe, 0, NULL);
 
     std::string input;
     while (true) {
@@ -74,6 +106,12 @@ int main() {
         }
         else if (input == "!heal") {
             input = "HEAL";
+        }
+        else if (input == "!tp" || input == "!blink" || input == "!teleport") {
+            input = "TELEPORT";
+        }
+        else if (input == "!god" || input == "!invul" || input == "!wudi") {
+            input = "GOD";
         }
         else if (input.rfind("!sp ", 0) == 0) {
             input = "ADD_SP:" + input.substr(4);
