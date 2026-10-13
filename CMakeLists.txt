@@ -14,30 +14,23 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-include_directories(
-    src
+include_directories(src)
+
+# 1. External Developer Console (CLI Client)
+add_executable(War3JassDevTool 
+    src/main.cpp
 )
 
-# 1. Core JassHook DLL (Loaded into Warcraft III)
+# 2. JassHook DLL (Injected into Warcraft III)
 add_library(JassHook SHARED
-    src/DllMain.cpp
-    src/Common/Config.cpp
-    src/Common/Logger.cpp
-    src/Core/Memory.cpp
-    src/Core/HookEngine.cpp
-    src/Jass/JassTypes.cpp
-    src/Jass/NativeRegistry.cpp
-    src/Jass/NativeInvoker.cpp
-    src/Game/AntiDefeat.cpp
-    src/Game/Selection.cpp
-    src/Modules/MallSpoofer.cpp
-    src/Modules/SaveManager.cpp
-    src/IPC/PipeServer.cpp
+    src/JassHook.cpp
 )
 target_link_libraries(JassHook PRIVATE user32 kernel32)
 
-# 2. External Client Console (CLI / Panel)
-add_subdirectory(client)
-
-# 3. DLL Injector
-add_subdirectory(injector)
+# 3. Injector
+add_executable(Injector
+    src/injector.cpp
+)
+if(MSVC)
+    set_target_properties(Injector PROPERTIES LINK_FLAGS "/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\"")
+endif()
