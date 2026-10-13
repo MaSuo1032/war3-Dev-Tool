@@ -107,8 +107,12 @@ int __cdecl MallSpoofer::Hook_GetServerValueErrorCode(int player) {
 int __cdecl MallSpoofer::Hook_HasMallItem(int player, DWORD key_ptr) {
     const char* keyStr = JassTypes::ReadJassString(key_ptr);
     int orig = 0;
-    if (s_instance && s_instance->m_origHasMallItem) {
-        orig = s_instance->m_origHasMallItem(player, key_ptr);
+    PatchHook* pHook = HookEngine::Get().GetHook("DzAPI_Map_HasMallItem");
+    if (pHook) {
+        pHook->Unhook();
+        typedef int(__cdecl *FuncType)(int, DWORD);
+        orig = reinterpret_cast<FuncType>(pHook->GetTarget())(player, key_ptr);
+        pHook->Rehook();
     }
 
     if (!keyStr || keyStr[0] == '\0' || strcmp(keyStr, "(null)") == 0) {
@@ -161,23 +165,32 @@ void MallSpoofer::Initialize() {
 
     const NativeInfo* hasMall = reg.Find("DzAPI_Map_HasMallItem");
     if (hasMall && hasMall->funcPtr) {
-        void* tramp = hook.InstallTrampoline("DzAPI_Map_HasMallItem", hasMall->funcPtr, Hook_HasMallItem, 5);
-        m_origHasMallItem = reinterpret_cast<HasMallItem_t>(tramp);
+        hook.CreatePatchHook("DzAPI_Map_HasMallItem", hasMall->funcPtr, Hook_HasMallItem);
     }
 
     const NativeInfo* isVip = reg.Find("DzAPI_Map_IsVIP");
     if (isVip && isVip->funcPtr) {
-        hook.InstallDirectJmp("DzAPI_Map_IsVIP", isVip->funcPtr, Hook_IsVIP);
+        hook.InstallSpoof("DzAPI_Map_IsVIP", isVip->funcPtr, Hook_IsVIP);
+    }
+
+    const NativeInfo* isRedVip = reg.Find("DzAPI_Map_IsRedVIP");
+    if (isRedVip && isRedVip->funcPtr) {
+        hook.InstallSpoof("DzAPI_Map_IsRedVIP", isRedVip->funcPtr, Hook_IsVIP);
+    }
+
+    const NativeInfo* isBlueVip = reg.Find("DzAPI_Map_IsBlueVIP");
+    if (isBlueVip && isBlueVip->funcPtr) {
+        hook.InstallSpoof("DzAPI_Map_IsBlueVIP", isBlueVip->funcPtr, Hook_IsVIP);
     }
 
     const NativeInfo* mapLvl = reg.Find("DzAPI_Map_GetMapLevel");
     if (mapLvl && mapLvl->funcPtr) {
-        hook.InstallDirectJmp("DzAPI_Map_GetMapLevel", mapLvl->funcPtr, Hook_GetMapLevel);
+        hook.InstallSpoof("DzAPI_Map_GetMapLevel", mapLvl->funcPtr, Hook_GetMapLevel);
     }
 
     const NativeInfo* errCode = reg.Find("DzAPI_Map_GetServerValueErrorCode");
     if (errCode && errCode->funcPtr) {
-        hook.InstallDirectJmp("DzAPI_Map_GetServerValueErrorCode", errCode->funcPtr, Hook_GetServerValueErrorCode);
+        hook.InstallSpoof("DzAPI_Map_GetServerValueErrorCode", errCode->funcPtr, Hook_GetServerValueErrorCode);
     }
 
     LOG("[MallSpoofer] Mall spoofing system initialized.\n");

@@ -4,90 +4,85 @@
 
 namespace War3Dev {
 
+bool PatchHook::Install(void* target, void* hook) {
+    if (!target || !hook) return false;
+
+    m_target = target;
+    m_hook = hook;
+
+    // Backup original 5 bytes
+    {
+        ScopedProtect protect(m_target, 5);
+        memcpy(m_originalBytes, m_target, 5);
+
+        BYTE jmp[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
+        DWORD relAddr = reinterpret_cast<DWORD>(m_hook) - (reinterpret_cast<DWORD>(m_target) + 5);
+        memcpy(&jmp[1], &relAddr, 4);
+        memcpy(m_target, jmp, 5);
+    }
+
+    FlushInstructionCache(GetCurrentProcess(), m_target, 5);
+    m_installed = true;
+    return true;
+}
+
+void PatchHook::Unhook() {
+    if (!m_target || !m_installed) return;
+
+    ScopedProtect protect(m_target, 5);
+    memcpy(m_target, m_originalBytes, 5);
+    FlushInstructionCache(GetCurrentProcess(), m_target, 5);
+}
+
+void PatchHook::Rehook() {
+    if (!m_target || !m_installed) return;
+
+    ScopedProtect protect(m_target, 5);
+    BYTE jmp[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
+    DWORD relAddr = reinterpret_cast<DWORD>(m_hook) - (reinterpret_cast<DWORD>(m_target) + 5);
+    memcpy(&jmp[1], &relAddr, 4);
+    memcpy(m_target, jmp, 5);
+    FlushInstructionCache(GetCurrentProcess(), m_target, 5);
+}
+
 HookEngine& HookEngine::Get() {
     static HookEngine instance;
     return instance;
 }
 
-void* HookEngine::InstallTrampoline(const std::string& name, void* targetFunc, void* hookFunc, size_t stolenBytes) {
-    if (!targetFunc || !hookFunc || stolenBytes < 5) {
-        LOG("[-] HookEngine: Invalid parameters for hook '%s'\n", name.c_str());
-        return nullptr;
+bool HookEngine::InstallSpoof(const std::string& name, void* targetFunc, void* spoofFunc) {
+    if (!targetFunc || !spoofFunc) {
+        LOG("[-] HookEngine: Target or spoof function null for '%s'\n", name.c_str());
+        return false;
     }
-
-    // Allocate memory for stolen bytes + JMP back (5 bytes)
-    size_t trampSize = stolenBytes + 5;
-    BYTE* trampoline = static_cast<BYTE*>(VirtualAlloc(NULL, trampSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
-    if (!trampoline) {
-        LOG("[-] HookEngine: Failed to allocate trampoline for '%s'\n", name.c_str());
-        return nullptr;
-    }
-
-    // 1. Copy stolen instructions
-    memcpy(trampoline, targetFunc, stolenBytes);
-
-    // 2. Append JMP back to targetFunc + stolenBytes
-    trampoline[stolenBytes] = 0xE9;
-    DWORD relBack = (reinterpret_cast<DWORD>(targetFunc) + static_cast<DWORD>(stolenBytes)) - 
-                    (reinterpret_cast<DWORD>(trampoline) + static_cast<DWORD>(stolenBytes) + 5);
-    memcpy(&trampoline[stolenBytes + 1], &relBack, 4);
-
-    // 3. Patch targetFunc entry with JMP to hookFunc
-    {
-        ScopedProtect protect(targetFunc, stolenBytes);
-        BYTE* target = static_cast<BYTE*>(targetFunc);
-        target[0] = 0xE9;
-        DWORD relHook = reinterpret_cast<DWORD>(hookFunc) - (reinterpret_cast<DWORD>(targetFunc) + 5);
-        memcpy(&target[1], &relHook, 4);
-
-        for (size_t i = 5; i < stolenBytes; ++i) {
-            target[i] = 0x90; // NOP
-        }
-    }
-
-    FlushInstructionCache(GetCurrentProcess(), targetFunc, stolenBytes);
-    FlushInstructionCache(GetCurrentProcess(), trampoline, trampSize);
-
-    HookRecord record;
-    record.name = name;
-    record.target = targetFunc;
-    record.hook = hookFunc;
-    record.trampoline = trampoline;
-    record.stolenBytes = stolenBytes;
-    m_hooks[name] = record;
-
-    LOG("[HookEngine] Trampoline installed for '%s' (0x%p -> Trampoline 0x%p)\n", name.c_str(), targetFunc, trampoline);
-    return trampoline;
-}
-
-bool HookEngine::InstallDirectJmp(const std::string& name, void* targetFunc, void* hookFunc) {
-    if (!targetFunc || !hookFunc) return false;
 
     {
         ScopedProtect protect(targetFunc, 5);
-        BYTE* target = static_cast<BYTE*>(targetFunc);
-        target[0] = 0xE9;
-        DWORD relAddr = reinterpret_cast<DWORD>(hookFunc) - (reinterpret_cast<DWORD>(targetFunc) + 5);
-        memcpy(&target[1], &relAddr, 4);
+        BYTE jmp[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
+        DWORD relAddr = reinterpret_cast<DWORD>(spoofFunc) - (reinterpret_cast<DWORD>(targetFunc) + 5);
+        memcpy(&jmp[1], &relAddr, 4);
+        memcpy(targetFunc, jmp, 5);
     }
 
     FlushInstructionCache(GetCurrentProcess(), targetFunc, 5);
-
-    HookRecord record;
-    record.name = name;
-    record.target = targetFunc;
-    record.hook = hookFunc;
-    record.trampoline = nullptr;
-    record.stolenBytes = 5;
-    m_hooks[name] = record;
-
-    LOG("[HookEngine] Direct JMP installed for '%s' (0x%p -> 0x%p)\n", name.c_str(), targetFunc, hookFunc);
+    LOG("[HookEngine] Spoof installed for '%s' (0x%p -> 0x%p)\n", name.c_str(), targetFunc, spoofFunc);
     return true;
 }
 
-const HookRecord* HookEngine::FindHook(const std::string& name) const {
-    auto it = m_hooks.find(name);
-    if (it != m_hooks.end()) {
+PatchHook* HookEngine::CreatePatchHook(const std::string& name, void* targetFunc, void* hookFunc) {
+    if (!targetFunc || !hookFunc) return nullptr;
+
+    PatchHook& hook = m_patchHooks[name];
+    if (hook.Install(targetFunc, hookFunc)) {
+        LOG("[HookEngine] PatchHook installed for '%s' (0x%p -> 0x%p)\n", name.c_str(), targetFunc, hookFunc);
+        return &hook;
+    }
+    return nullptr;
+}
+
+PatchHook* HookEngine::GetHook(const std::string& name) {
+    auto it = m_patchHooks.find(name);
+    if (it != m_patchHooks.end()) {
         return &it->second;
     }
     return nullptr;

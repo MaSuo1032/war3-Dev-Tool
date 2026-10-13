@@ -21,18 +21,27 @@ int __cdecl SaveManager::Hook_SaveServerValue(int player, DWORD key_ptr, DWORD v
     LOG("[SaveServerValue] Player: %d | Key: \"%s\" | Value: \"%s\"\n", player, keyStr, valStr);
     LOG_SAVE("Player %d SAVED: %s = %s\n", player, keyStr, valStr);
 
-    if (s_instance && s_instance->m_origSaveServerValue) {
-        return s_instance->m_origSaveServerValue(player, key_ptr, value_ptr);
+    int result = 1;
+    PatchHook* pHook = HookEngine::Get().GetHook("DzAPI_Map_SaveServerValue");
+    if (pHook) {
+        pHook->Unhook();
+        typedef int(__cdecl *FuncType)(int, DWORD, DWORD);
+        result = reinterpret_cast<FuncType>(pHook->GetTarget())(player, key_ptr, value_ptr);
+        pHook->Rehook();
     }
-    return 1;
+    return result;
 }
 
 DWORD __cdecl SaveManager::Hook_GetServerValue(int player, DWORD key_ptr) {
     const char* keyStr = JassTypes::ReadJassString(key_ptr);
 
     DWORD result = 0;
-    if (s_instance && s_instance->m_origGetServerValue) {
-        result = s_instance->m_origGetServerValue(player, key_ptr);
+    PatchHook* pHook = HookEngine::Get().GetHook("DzAPI_Map_GetServerValue");
+    if (pHook) {
+        pHook->Unhook();
+        typedef DWORD(__cdecl *FuncType)(int, DWORD);
+        result = reinterpret_cast<FuncType>(pHook->GetTarget())(player, key_ptr);
+        pHook->Rehook();
     }
 
     std::string valStr = JassTypes::DecodeServerString(result);
@@ -49,8 +58,12 @@ void __cdecl SaveManager::Hook_Stat_SetStat(int player, DWORD key_ptr, DWORD val
     LOG("[Stat_SetStat] Player: %d | Key: \"%s\" | Value: \"%s\"\n", player, keyStr, valStr);
     LOG_SAVE("Player %d SET_STAT: %s = %s\n", player, keyStr, valStr);
 
-    if (s_instance && s_instance->m_origStatSetStat) {
-        s_instance->m_origStatSetStat(player, key_ptr, value_ptr);
+    PatchHook* pHook = HookEngine::Get().GetHook("DzAPI_Map_Stat_SetStat");
+    if (pHook) {
+        pHook->Unhook();
+        typedef void(__cdecl *FuncType)(int, DWORD, DWORD);
+        reinterpret_cast<FuncType>(pHook->GetTarget())(player, key_ptr, value_ptr);
+        pHook->Rehook();
     }
 }
 
@@ -63,11 +76,15 @@ void SaveManager::ExecuteManualSave(const SavePayload* payload) {
     LOG("[SaveServerValue] Manual IPC Save -> Player: %d | Key: \"%s\" | Value: \"%s\"\n",
         payload->player, payload->key, payload->val);
 
-    if (m_origSaveServerValue) {
-        int ret = m_origSaveServerValue(payload->player, fakeKey, fakeVal);
+    PatchHook* pHook = HookEngine::Get().GetHook("DzAPI_Map_SaveServerValue");
+    if (pHook) {
+        pHook->Unhook();
+        typedef int(__cdecl *FuncType)(int, DWORD, DWORD);
+        int ret = reinterpret_cast<FuncType>(pHook->GetTarget())(payload->player, fakeKey, fakeVal);
+        pHook->Rehook();
         LOG("  -> DzAPI_Map_SaveServerValue returned: %d\n", ret);
     } else {
-        LOG("  -> ERROR: m_origSaveServerValue is NULL! Native was not hooked.\n");
+        LOG("  -> ERROR: DzAPI_Map_SaveServerValue is not hooked!\n");
     }
 
     LOG_SAVE("Player %d MANUAL_SAVED: %s = %s\n", payload->player, payload->key, payload->val);
@@ -82,20 +99,17 @@ void SaveManager::Initialize() {
 
     const NativeInfo* saveInfo = reg.Find("DzAPI_Map_SaveServerValue");
     if (saveInfo && saveInfo->funcPtr) {
-        void* tramp = hook.InstallTrampoline("DzAPI_Map_SaveServerValue", saveInfo->funcPtr, Hook_SaveServerValue, 7);
-        m_origSaveServerValue = reinterpret_cast<SaveServerValue_t>(tramp);
+        hook.CreatePatchHook("DzAPI_Map_SaveServerValue", saveInfo->funcPtr, Hook_SaveServerValue);
     }
 
     const NativeInfo* getInfo = reg.Find("DzAPI_Map_GetServerValue");
     if (getInfo && getInfo->funcPtr) {
-        void* tramp = hook.InstallTrampoline("DzAPI_Map_GetServerValue", getInfo->funcPtr, Hook_GetServerValue, 5);
-        m_origGetServerValue = reinterpret_cast<GetServerValue_t>(tramp);
+        hook.CreatePatchHook("DzAPI_Map_GetServerValue", getInfo->funcPtr, Hook_GetServerValue);
     }
 
     const NativeInfo* statInfo = reg.Find("DzAPI_Map_Stat_SetStat");
     if (statInfo && statInfo->funcPtr) {
-        void* tramp = hook.InstallTrampoline("DzAPI_Map_Stat_SetStat", statInfo->funcPtr, Hook_Stat_SetStat, 5);
-        m_origStatSetStat = reinterpret_cast<StatSetStat_t>(tramp);
+        hook.CreatePatchHook("DzAPI_Map_Stat_SetStat", statInfo->funcPtr, Hook_Stat_SetStat);
     }
 
     LOG("[SaveManager] Save monitoring & injection hooks initialized.\n");

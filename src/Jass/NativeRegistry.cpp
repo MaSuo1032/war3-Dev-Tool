@@ -68,14 +68,14 @@ void NativeRegistry::PrepopulateFromModules(HMODULE hGame, HMODULE hPlugin) {
     }
 
     if (hPlugin) {
-        for (size_t i = 0; i < g_dzApiNativesCount; ++i) {
-            void* ptr = reinterpret_cast<void*>(reinterpret_cast<DWORD>(hPlugin) + g_dzApiNatives[i].rva);
-            m_natives[g_dzApiNatives[i].name] = { g_dzApiNatives[i].name, g_dzApiNatives[i].sig, ptr };
+        for (int i = 0; i < g_dzTableCount; ++i) {
+            void* ptr = reinterpret_cast<void*>(reinterpret_cast<DWORD>(hPlugin) + g_dzTable[i].rva);
+            m_natives[g_dzTable[i].name] = { g_dzTable[i].name, g_dzTable[i].sig, ptr };
         }
     }
 
-    LOG("[NativeRegistry] Prepopulated with %zu Blizzard & %zu DzAPI entries.\n", 
-        g_blizzardNativesCount, hPlugin ? g_dzApiNativesCount : 0);
+    LOG("[NativeRegistry] Prepopulated with %zu Blizzard & %d DzAPI entries.\n", 
+        g_blizzardNativesCount, hPlugin ? g_dzTableCount : 0);
 }
 
 void NativeRegistry::Register(const char* name, const char* sig, void* funcPtr) {

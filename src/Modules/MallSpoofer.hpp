@@ -23,9 +23,6 @@ private:
     static int __cdecl Hook_GetMapLevel(int player);
     static int __cdecl Hook_GetServerValueErrorCode(int player);
 
-    typedef int(__cdecl *HasMallItem_t)(int, DWORD);
-    HasMallItem_t m_origHasMallItem = nullptr;
-
     std::unordered_set<std::string> m_blacklist;
     std::unordered_set<std::string> m_whitelist;
 };
