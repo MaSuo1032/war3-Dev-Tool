@@ -18,8 +18,14 @@ void PrintMenu() {
     std::cout << "  !mall <0|1|2|3>   : 切換商城模式 (0=原廠關閉, 1=白名單, 2=全開, 3=百分比)\n";
     std::cout << "  !percent <1~100>  : 設定商城隨機開啟百分比 (僅模式3生效)\n";
     std::cout << "  !level <等級>     : 動態偽造地圖等級 (例: !level 99)\n";
-    std::cout << "  !antiover <0|1>   : 切換防作弊遊戲失敗/結算阻擋保護 (1=開啟, 0=關閉)\n";
-    std::cout << "  !kill             : 秒殺當前選取的單位 (HP歸零)\n\n";
+    std::cout << "  !vip <0|1|2>      : 動態切換平台 VIP 等級 (2=至尊VIP，解鎖翅膀光環特權)\n";
+    std::cout << "  !antiover <0|1>   : 切換防作弊遊戲失敗/結算阻擋保護 (1=開啟, 0=關閉)\n\n";
+    std::cout << " [英雄與單位增強 (根據 DzAPI 記憶體逆向)]\n";
+    std::cout << "  !heal             : 補滿當前選取/滑鼠懸停單位的生命值\n";
+    std::cout << "  !sp <數量>        : 為目標英雄增加技能點 (例: !sp 50)\n";
+    std::cout << "  !stats <數量>     : 為目標英雄增加力量與敏捷 (例: !stats 500)\n";
+    std::cout << "  !xp <數量>        : 為目標英雄增加經驗值 (例: !xp 10000)\n";
+    std::cout << "  !kill             : 秒殺當前選取/滑鼠懸停的單位 (HP歸零)\n\n";
     std::cout << " [動態 Native 呼叫]\n";
     std::cout << "  !<Native名稱> <參數1> <參數2> ... (例: !SuicideUnit 123 456)\n";
     std::cout << "  !help             : 重新顯示此選單\n";
@@ -65,6 +71,21 @@ int main() {
         
         if (input == "!kill" || input == "!killselected") {
             input = "KILL";
+        }
+        else if (input == "!heal") {
+            input = "HEAL";
+        }
+        else if (input.rfind("!sp ", 0) == 0) {
+            input = "ADD_SP:" + input.substr(4);
+        }
+        else if (input.rfind("!stats ", 0) == 0) {
+            input = "ADD_STATS:" + input.substr(7);
+        }
+        else if (input.rfind("!xp ", 0) == 0) {
+            input = "ADD_XP:" + input.substr(4);
+        }
+        else if (input.rfind("!vip ", 0) == 0) {
+            input = "VIP:" + input.substr(5);
         }
         else if (input == "!help") {
             PrintMenu();

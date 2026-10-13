@@ -199,9 +199,12 @@ int g_MallMode = 2; // 0 = Off, 1 = Whitelist, 2 = All, 3 = Percentage
 int g_MallPercent = 30; // 1-100%
 int g_MapLevel = 99;
 int g_PreventGameOver = 1; // 1 = Block Defeat, 0 = Off
+int g_PlatformVIP = 2; // 0 = Normal, 1 = VIP, 2 = Super VIP (Platform Rewards)
 
 int __cdecl Spoof_True() { return 1; }
 int __cdecl Spoof_LevelDynamic() { return g_MapLevel; }
+int __cdecl Spoof_PlatformVIP() { return g_PlatformVIP; }
+
 
 // ==========================================
 // Trampoline Hooks (Monitor Only)
@@ -562,52 +565,144 @@ void FreeFakeJassString(DWORD jassStr) {
     delete jStr;
 }
 
-void KillSelectedUnit() {
+// =========================================================================
+// Advanced Hero & Unit Manipulation (Grounded in DzAPI_Structures.h)
+// =========================================================================
+void HandleHeroAction(int action, int param) {
     __try {
         DWORD gameBase = 0x6F000000;
-        DWORD selectedUnitList = *(DWORD*)(gameBase + 0xBE4238); // UNIT_LIST_RVA
-        if (!selectedUnitList) return;
-        DWORD playerId = *(DWORD*)(selectedUnitList + 0x28); // PLAYER_ID_OFF
-        if (playerId >= 16) return;
-        DWORD player = *(DWORD*)(selectedUnitList + 0x58 + playerId * 4); // PLAYER_TABLE_OFF
-        if (!player) return;
-        DWORD listRoot = *(DWORD*)(player + 0x34); // UNIT_LIST_ROOT_OFF
-        if (!listRoot) return;
-        DWORD listHead = *(DWORD*)(listRoot + 0x1F0); // LIST_HEAD_OFF
-        if (!listHead) return;
-        DWORD listLength = *(DWORD*)(listRoot + 0x1F8); // LIST_LENGTH_OFF
-        if (listLength == 0) return;
-        DWORD firstNode = *(DWORD*)(listHead + 0x00); // NODE_NEXT_OFF
-        if (!firstNode) return;
-        DWORD selectedUnit = *(DWORD*)(firstNode + 0x08); // NODE_UNIT_OFF
-        if (!selectedUnit) return;
+        DWORD targetUnit = 0;
         
-        DWORD hpIndex = *(DWORD*)(selectedUnit + 0xA0); // UNIT_HP_INDEX_OFF
+        // 1. Try selected unit first (CGameWar3 + 0x58 -> CPlayerWar3 -> selection list)
+        DWORD* pGame = (DWORD*)(gameBase + 0xBE4238);
+        if (pGame && *pGame) {
+            DWORD pGameWar3 = *pGame;
+            DWORD playerId = *(DWORD*)(pGameWar3 + 0x28);
+            if (playerId < 16) {
+                DWORD player = *(DWORD*)(pGameWar3 + 0x58 + playerId * 4);
+                if (player) {
+                    DWORD listRoot = *(DWORD*)(player + 0x34);
+                    if (listRoot) {
+                        DWORD listHead = *(DWORD*)(listRoot + 0x1F0);
+                        if (listHead) {
+                            DWORD listLength = *(DWORD*)(listRoot + 0x1F8);
+                            if (listLength > 0) {
+                                DWORD firstNode = *(DWORD*)(listHead + 0x00);
+                                if (firstNode) {
+                                    targetUnit = *(DWORD*)(firstNode + 0x08);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         
-        DWORD thisGame = *(DWORD*)(gameBase + 0xBE40A8); // THIS_GAME_RVA
-        if (!thisGame) return;
-        DWORD gameMemory = *(DWORD*)(thisGame + 0x0C); // GAME_TABLE_OFF
-        if (!gameMemory) return;
+        // 2. If no selected unit, try unit under mouse cursor (CGameUI + 0x3BC -> +0x244)
+        if (!targetUnit) {
+            DWORD* pUI = (DWORD*)(gameBase + 0xBE6350);
+            if (pUI && *pUI) {
+                DWORD worldFrame = *(DWORD*)(*pUI + 0x3BC);
+                if (worldFrame) {
+                    targetUnit = *(DWORD*)(worldFrame + 0x244);
+                }
+            }
+        }
         
-        DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
-        DWORD address1 = *(DWORD*)entryAddress;
-        if (!address1) return;
-        
-        float* hpValue = (float*)(address1 + 0x78);
-        *hpValue = 0.0f; // INSTAKILL
-        
-        ConsoleLog("[Hack] Instantly killed selected unit!\n");
+        if (!targetUnit) {
+            ConsoleLog("[HeroAction] No unit selected or hovered under cursor!\n");
+            return;
+        }
+
+        // Action 1: Kill Target Unit
+        if (action == 1) {
+            DWORD hpIndex = *(DWORD*)(targetUnit + 0xA0);
+            DWORD thisGame = *(DWORD*)(gameBase + 0xBE40A8);
+            if (thisGame) {
+                DWORD gameMemory = *(DWORD*)(thisGame + 0x0C);
+                if (gameMemory) {
+                    DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
+                    DWORD address1 = *(DWORD*)entryAddress;
+                    if (address1) {
+                        float* hpValue = (float*)(address1 + 0x78);
+                        *hpValue = 0.0f;
+                        ConsoleLog("[HeroAction] Instantly killed target unit!\n");
+                    }
+                }
+            }
+            return;
+        }
+
+        // Action 2: Heal (Full HP Restore)
+        if (action == 2) {
+            DWORD hpIndex = *(DWORD*)(targetUnit + 0xA0);
+            DWORD thisGame = *(DWORD*)(gameBase + 0xBE40A8);
+            if (thisGame) {
+                DWORD gameMemory = *(DWORD*)(thisGame + 0x0C);
+                if (gameMemory) {
+                    DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
+                    DWORD address1 = *(DWORD*)entryAddress;
+                    if (address1) {
+                        float maxHp = *(float*)(address1 + 0x74);
+                        float* hpValue = (float*)(address1 + 0x78);
+                        *hpValue = (maxHp > 0.0f) ? maxHp : 999999.0f;
+                        ConsoleLog("[HeroAction] Restored target unit HP to maximum!\n");
+                    }
+                }
+            }
+            return;
+        }
+
+        // Actions 3, 4, 5: CAbilityHero modifications (+0x1F0)
+        DWORD heroAbility = *(DWORD*)(targetUnit + 0x1F0);
+        if (!heroAbility) {
+            ConsoleLog("[HeroAction] Target unit is not a Hero (no CAbilityHero at +0x1F0).\n");
+            return;
+        }
+
+        if (action == 3) {
+            // Add Skill Points (+0x90)
+            int* pSp = (int*)(heroAbility + 0x90);
+            *pSp += param;
+            char log[128];
+            sprintf_s(log, sizeof(log), "[HeroAction] Added %d Skill Points! (Total: %d)\n", param, *pSp);
+            ConsoleLog(log);
+        }
+        else if (action == 4) {
+            // Boost STR (+0x94) and AGI (+0xA8)
+            int* pStr = (int*)(heroAbility + 0x94);
+            int* pAgi = (int*)(heroAbility + 0xA8);
+            *pStr += param;
+            *pAgi += param;
+            char log[128];
+            sprintf_s(log, sizeof(log), "[HeroAction] Boosted Stats +%d! (STR: %d, AGI: %d)\n", param, *pStr, *pAgi);
+            ConsoleLog(log);
+        }
+        else if (action == 5) {
+            // Add Experience XP (+0x8C)
+            int* pXp = (int*)(heroAbility + 0x8C);
+            *pXp += param;
+            char log[128];
+            sprintf_s(log, sizeof(log), "[HeroAction] Added %d XP! (Total: %d)\n", param, *pXp);
+            ConsoleLog(log);
+        }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        ConsoleLog("[Hack] Failed to kill selected unit (Exception).\n");
+        ConsoleLog("[HeroAction] Exception caught during hero manipulation.\n");
     }
 }
 
 // -- Main Thread Execution via WndProc Hook --
 LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_APP + 2) {
-        KillSelectedUnit();
+        HandleHeroAction(1, 0); // Kill
         return 0;
     }
+    
+    if (uMsg == WM_APP + 4) {
+        HandleHeroAction((int)wParam, (int)lParam);
+        return 0;
+    }
+
     
     if (uMsg == WM_APP + 3) {
         SaveData* sd = (SaveData*)lParam;
@@ -701,8 +796,40 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam) {
                 
                 if (strncmp(buffer, "KILL", 4) == 0) {
                     if (g_gameHwnd) {
-                        SendMessageA(g_gameHwnd, WM_APP + 2, 0, 0);
+                        SendMessageA(g_gameHwnd, WM_APP + 4, 1, 0); // Action 1 = Kill
                     }
+                }
+                else if (strncmp(buffer, "HEAL", 4) == 0) {
+                    if (g_gameHwnd) {
+                        SendMessageA(g_gameHwnd, WM_APP + 4, 2, 0); // Action 2 = Heal (Full HP)
+                    }
+                }
+                else if (strncmp(buffer, "ADD_SP:", 7) == 0) {
+                    int amount = atoi(buffer + 7);
+                    if (amount <= 0) amount = 10;
+                    if (g_gameHwnd) {
+                        SendMessageA(g_gameHwnd, WM_APP + 4, 3, (LPARAM)amount); // Action 3 = Add SP
+                    }
+                }
+                else if (strncmp(buffer, "ADD_STATS:", 10) == 0) {
+                    int amount = atoi(buffer + 10);
+                    if (amount <= 0) amount = 500;
+                    if (g_gameHwnd) {
+                        SendMessageA(g_gameHwnd, WM_APP + 4, 4, (LPARAM)amount); // Action 4 = Add Stats
+                    }
+                }
+                else if (strncmp(buffer, "ADD_XP:", 7) == 0) {
+                    int amount = atoi(buffer + 7);
+                    if (amount <= 0) amount = 10000;
+                    if (g_gameHwnd) {
+                        SendMessageA(g_gameHwnd, WM_APP + 4, 5, (LPARAM)amount); // Action 5 = Add XP
+                    }
+                }
+                else if (strncmp(buffer, "VIP:", 4) == 0) {
+                    g_PlatformVIP = atoi(buffer + 4);
+                    char log[128];
+                    sprintf_s(log, sizeof(log), "[Control] PlatformVIP changed to: %d\n", g_PlatformVIP);
+                    ConsoleLog(log);
                 }
                 else if (strncmp(buffer, "SAVE:", 5) == 0) {
                     char* p1 = strchr(buffer, ':');
@@ -907,20 +1034,30 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
         g_MapLevel = GetPrivateProfileIntW(L"Spoof", L"MapLevel", 99, iniPathW);
         g_MallPercent = GetPrivateProfileIntW(L"Spoof", L"MallPercent", 30, iniPathW);
         g_PreventGameOver = GetPrivateProfileIntW(L"Spoof", L"PreventGameOver", 1, iniPathW);
+        g_PlatformVIP = GetPrivateProfileIntW(L"Spoof", L"PlatformVIP", 2, iniPathW);
         
         char cfgLog[256];
-        sprintf_s(cfgLog, sizeof(cfgLog), "  -> MallMode: %d (0=Off, 1=Whitelist, 2=All, 3=Percent)\n  -> MallPercent: %d%%\n  -> MapLevel: %d\n  -> PreventGameOver: %d\n", 
-                  g_MallMode, g_MallPercent, g_MapLevel, g_PreventGameOver);
+        sprintf_s(cfgLog, sizeof(cfgLog), "  -> MallMode: %d (0=Off, 1=Whitelist, 2=All, 3=Percent)\n  -> MallPercent: %d%%\n  -> MapLevel: %d\n  -> PreventGameOver: %d\n  -> PlatformVIP: %d\n", 
+                  g_MallMode, g_MallPercent, g_MapLevel, g_PreventGameOver, g_PlatformVIP);
         ConsoleLog(cfgLog);
 
         LoadMallWhitelist();
         LoadMallBlacklist();
 
-        ConsoleLog("[Spoofer] Applying VIP / Mall / Level Spoofs...\n");
+        ConsoleLog("[Spoofer] Applying VIP / Mall / Level Spoofs (Grounded in DzAPI Research)...\n");
         if (g_MallMode > 0) {
             InstallSpoofHook("DzAPI_Map_IsVIP", (void*)Spoof_True);
+            InstallSpoofHook("DzAPI_Map_GetPlatformVIP", (void*)Spoof_PlatformVIP);
+            InstallSpoofHook("DzAPI_Map_IsRedVIP", (void*)Spoof_True);
+            InstallSpoofHook("DzAPI_Map_IsBlueVIP", (void*)Spoof_True);
+            InstallSpoofHook("DzAPI_Map_GetServerArchiveEquip", (void*)Spoof_True);
+            InstallSpoofHook("DzAPI_Map_GetServerArchiveDrop", (void*)Spoof_True);
         }
         InstallSpoofHook("DzAPI_Map_GetMapLevel", (void*)Spoof_LevelDynamic);
+        InstallSpoofHook("DzAPI_Map_GetLadderLevel", (void*)Spoof_LevelDynamic);
+        InstallSpoofHook("DzAPI_Map_GetLadderRank", (void*)Spoof_True);
+        InstallSpoofHook("DzAPI_Map_GetMapLevelRank", (void*)Spoof_True);
+
         
         ConsoleLog("[Spoofer] Applying ServerValue & MallItem Spoofer/Dumper...\n");
         InstallTrampolineHook("DzAPI_Map_HasMallItem", (void*)Monitor_HasMallItem, hkHasMallItem);

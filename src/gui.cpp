@@ -38,7 +38,7 @@
 #define IDC_BTN_MALL_WHITE    1022
 #define IDC_BTN_MALL_OFF      1023
 #define IDC_BTN_ANTIOVER      1024
-#define IDC_BTN_KILL          1025
+#define IDC_BTN_VIP_ALL       1025
 #define IDC_LBL_LEVEL         1026
 #define IDC_EDIT_LEVEL        1027
 #define IDC_BTN_SET_LEVEL     1028
@@ -46,17 +46,24 @@
 #define IDC_EDIT_PERCENT      1030
 #define IDC_BTN_SET_PERCENT   1031
 
-#define IDC_GRP_CMD           1040
-#define IDC_EDIT_CMD          1041
-#define IDC_BTN_SEND_CMD      1042
-#define IDC_LBL_CMD_HINT      1043
+#define IDC_GRP_HERO          1035
+#define IDC_BTN_HEAL          1036
+#define IDC_BTN_KILL          1037
+#define IDC_BTN_ADD_SP10      1038
+#define IDC_BTN_ADD_SP50      1039
+#define IDC_BTN_ADD_STATS     1040
+#define IDC_BTN_ADD_XP        1041
 
-#define IDC_GRP_LOG           1050
-#define IDC_EDIT_LOG          1051
-#define IDC_BTN_CLEAR_LOG     1052
-#define IDC_BTN_OPEN_TRACE    1053
-#define IDC_BTN_OPEN_SAVE     1054
-#define IDC_BTN_OPEN_PANEL    1055
+#define IDC_GRP_CMD           1050
+#define IDC_EDIT_CMD          1051
+#define IDC_BTN_SEND_CMD      1052
+
+#define IDC_GRP_LOG           1060
+#define IDC_EDIT_LOG          1061
+#define IDC_BTN_CLEAR_LOG     1062
+#define IDC_BTN_OPEN_TRACE    1063
+#define IDC_BTN_OPEN_SAVE     1064
+#define IDC_BTN_OPEN_PANEL    1065
 
 #define IDT_TIMER_STATUS      1
 
@@ -236,7 +243,7 @@ bool ConnectPipe() {
         return true;
     }
     g_hPipe = CreateFileA(
-        "\\\\.\\pipe\\War3JassDevPipe",
+        "\\\\.\\pipe\\War3JassDevTool",
         GENERIC_READ | GENERIC_WRITE,
         0, NULL, OPEN_EXISTING, 0, NULL);
     return (g_hPipe != INVALID_HANDLE_VALUE);
@@ -279,7 +286,6 @@ void DoInject() {
     std::string exeDir = GetExeDir();
     std::string dllPath = exeDir + "JassHook.dll";
     if (GetFileAttributesA(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        // Fallback to bin\JassHook.dll
         dllPath = exeDir + "bin\\JassHook.dll";
         if (GetFileAttributesA(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
             AppendLog(L"[-] 注入失敗: 找不到 JassHook.dll！請確認檔案位於程式同目錄下。");
@@ -293,7 +299,6 @@ void DoInject() {
     if (InjectDLL(pid, dllPath, err)) {
         AppendLog(L"[+] 恭喜！JassHook.dll 注入成功！");
         g_isDllInjected = true;
-        // Try connect pipe after brief moment
         Sleep(200);
         if (ConnectPipe()) {
             AppendLog(L"[IPC] 已成功連線至魔獸爭霸 IPC 管道！");
@@ -427,13 +432,28 @@ void SendSingleSave() {
     }
 }
 
-// Process Command Input (Supports !mall, !level, !antiover, !kill, !panel, !saveall, !save, etc.)
+// Process Command Input
 void ProcessCustomCommand(const std::string& inputCmd) {
     if (inputCmd.empty()) return;
 
     std::string cmd = inputCmd;
     if (cmd == "!kill" || cmd == "!killselected") {
         cmd = "KILL";
+    }
+    else if (cmd == "!heal") {
+        cmd = "HEAL";
+    }
+    else if (cmd.rfind("!sp ", 0) == 0) {
+        cmd = "ADD_SP:" + cmd.substr(4);
+    }
+    else if (cmd.rfind("!stats ", 0) == 0) {
+        cmd = "ADD_STATS:" + cmd.substr(7);
+    }
+    else if (cmd.rfind("!xp ", 0) == 0) {
+        cmd = "ADD_XP:" + cmd.substr(4);
+    }
+    else if (cmd.rfind("!vip ", 0) == 0) {
+        cmd = "VIP:" + cmd.substr(5);
     }
     else if (cmd == "!panel") {
         GenerateAndOpenPanel();
@@ -475,7 +495,6 @@ void ProcessCustomCommand(const std::string& inputCmd) {
         }
     }
     else if (cmd[0] == '!') {
-        // Native call: !SuicideUnit 123 456 -> NATIVE:SuicideUnit:123 456
         size_t sp = cmd.find(' ');
         if (sp != std::string::npos) {
             cmd = "NATIVE:" + cmd.substr(1, sp - 1) + ":" + cmd.substr(sp + 1);
@@ -512,7 +531,6 @@ LRESULT CALLBACK EditValSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_CREATE: {
-        // Setup timer for process and pipe auto-detection (1s interval)
         SetTimer(hWnd, IDT_TIMER_STATUS, 1000, NULL);
         break;
     }
@@ -521,7 +539,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         HDC hdcStatic = (HDC)wParam;
         HWND hwndStatic = (HWND)lParam;
         if (hwndStatic == g_hEditLog) {
-            SetTextColor(hdcStatic, RGB(0, 230, 118)); // Hacker/Console bright mint green
+            SetTextColor(hdcStatic, RGB(0, 230, 118)); // Bright Hacker/Console Green
             SetBkColor(hdcStatic, RGB(22, 24, 28));
             return (INT_PTR)g_hLogBrush;
         }
@@ -539,7 +557,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 swprintf_s(buf, L"遊戲進程: 已偵測到 war3.exe (PID: %lu) %s", pid, g_isDllInjected ? L"【已注入】" : L"【未注入】");
                 SetWindowTextW(g_hLblWar3, buf);
 
-                // Auto inject check
                 if (!g_isDllInjected && SendMessage(g_hChkAutoInject, BM_GETCHECK, 0, 0) == BST_CHECKED) {
                     DoInject();
                 }
@@ -549,9 +566,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 DisconnectPipe();
             }
 
-            // Pipe status check
             if (ConnectPipe()) {
-                SetWindowTextW(g_hLblPipe, L"IPC 連線: 已連線 (\\.\\pipe\\War3JassDevPipe 正常通訊)");
+                SetWindowTextW(g_hLblPipe, L"IPC 連線: 已連線 (\\.\\pipe\\War3JassDevTool 正常通訊)");
             } else {
                 SetWindowTextW(g_hLblPipe, L"IPC 連線: 尚未連線 (請注入 JassHook.dll)");
             }
@@ -605,6 +621,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             }
             break;
 
+        case IDC_BTN_VIP_ALL:
+            if (SendPipeCommand("VIP:2")) {
+                AppendLog(L"[VIP] 已啟用平台至尊VIP (VIP:2，特權/光環/翅膀/存檔全開)");
+            }
+            break;
+
         case IDC_BTN_ANTIOVER: {
             g_antiOverEnabled = !g_antiOverEnabled;
             std::string payload = g_antiOverEnabled ? "ANTIOVER:1" : "ANTIOVER:0";
@@ -620,9 +642,39 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             break;
         }
 
+        case IDC_BTN_HEAL:
+            if (SendPipeCommand("HEAL")) {
+                AppendLog(L"[英雄] 已補滿目標單位的生命值 (HEAL)");
+            }
+            break;
+
         case IDC_BTN_KILL:
             if (SendPipeCommand("KILL")) {
-                AppendLog(L"[動作] 已發送秒殺當前選取單位 (KILL)！");
+                AppendLog(L"[動作] 已秒殺選取/滑鼠懸停目標單位 (KILL)！");
+            }
+            break;
+
+        case IDC_BTN_ADD_SP10:
+            if (SendPipeCommand("ADD_SP:10")) {
+                AppendLog(L"[英雄] 已為目標英雄增加 10 點技能點 (ADD_SP:10)");
+            }
+            break;
+
+        case IDC_BTN_ADD_SP50:
+            if (SendPipeCommand("ADD_SP:50")) {
+                AppendLog(L"[英雄] 已為目標英雄增加 50 點技能點 (ADD_SP:50)");
+            }
+            break;
+
+        case IDC_BTN_ADD_STATS:
+            if (SendPipeCommand("ADD_STATS:500")) {
+                AppendLog(L"[英雄] 已為目標英雄增加 500 點力量與敏捷 (ADD_STATS:500)");
+            }
+            break;
+
+        case IDC_BTN_ADD_XP:
+            if (SendPipeCommand("ADD_XP:10000")) {
+                AppendLog(L"[英雄] 已為目標英雄增加 10000 點經驗值 (ADD_XP:10000)");
             }
             break;
 
@@ -705,19 +757,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
 // Entry Point
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    // High-DPI support
     SetProcessDPIAware();
-
-    // Enable SeDebugPrivilege at startup
     EnableDebugPrivilege();
 
-    // Init Common Controls
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
     icex.dwICC = ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES;
     InitCommonControlsEx(&icex);
 
-    // Register Window Class
     WNDCLASSEXW wcex{};
     wcex.cbSize = sizeof(WNDCLASSEXW);
     wcex.style = CS_HREDRAW | CS_VREDRAW;
@@ -729,9 +776,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     wcex.hIcon = LoadIcon(NULL, IDI_APPLICATION);
     RegisterClassExW(&wcex);
 
-    // Window Dimension & Positioning
     int winWidth = 840;
-    int winHeight = 780;
+    int winHeight = 840;
     int screenW = GetSystemMetrics(SM_CXSCREEN);
     int screenH = GetSystemMetrics(SM_CYSCREEN);
     int posX = (screenW - winWidth) / 2;
@@ -739,14 +785,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     g_hWnd = CreateWindowExW(
         0, L"War3DevToolUI_Class",
-        L"Warcraft III JassHook 開發者控制台 v2.0 (GUI 整合版)",
+        L"Warcraft III JassHook 開發者控制台 v2.0 (GUI 整合增強版)",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         posX, posY, winWidth, winHeight,
         NULL, NULL, hInstance, NULL);
 
     if (!g_hWnd) return 0;
 
-    // Fonts & GDI
     g_hFont = CreateFontW(
         -14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -759,7 +804,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     g_hLogBrush = CreateSolidBrush(RGB(22, 24, 28));
 
-    // Helper macro to create and set font
     auto CreateCtrl = [&](LPCWSTR className, LPCWSTR text, DWORD style, int x, int y, int w, int h, int id) -> HWND {
         HWND hCtrl = CreateWindowExW(0, className, text, WS_CHILD | WS_VISIBLE | style,
                                     x, y, w, h, g_hWnd, (HMENU)(INT_PTR)id, hInstance, NULL);
@@ -796,41 +840,52 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     CreateCtrl(L"BUTTON", L"發送單筆存檔", BS_PUSHBUTTON, 635, 178, 150, 28, IDC_BTN_SAVESINGLE);
 
     // ==========================================
-    // 3. 商城與動態控制 (Mall & Cheats)
+    // 3. 商城與平台特權 (Mall & Platform VIP)
     // ==========================================
-    CreateCtrl(L"BUTTON", L"【商城與動態控制】", BS_GROUPBOX, 15, 230, 790, 105, IDC_GRP_MALL);
-    CreateCtrl(L"BUTTON", L"🛒 商城全開 (!mall 2)", BS_PUSHBUTTON, 30, 255, 140, 30, IDC_BTN_MALL_ALL);
-    CreateCtrl(L"BUTTON", L"📋 商城白名單 (!mall 1)", BS_PUSHBUTTON, 180, 255, 150, 30, IDC_BTN_MALL_WHITE);
-    CreateCtrl(L"BUTTON", L"❌ 關閉商城偽造 (!mall 0)", BS_PUSHBUTTON, 340, 255, 150, 30, IDC_BTN_MALL_OFF);
-    g_hBtnAntiOver = CreateCtrl(L"BUTTON", L"🛡️ 防失敗保護 (目前: 開)", BS_PUSHBUTTON, 500, 255, 150, 30, IDC_BTN_ANTIOVER);
-    CreateCtrl(L"BUTTON", L"💀 秒殺選取單位", BS_PUSHBUTTON, 660, 255, 125, 30, IDC_BTN_KILL);
+    CreateCtrl(L"BUTTON", L"【商城與平台特權 (DzAPI 逆向增強)】", BS_GROUPBOX, 15, 230, 790, 90, IDC_GRP_MALL);
+    CreateCtrl(L"BUTTON", L"🛒 商城全開 (!mall 2)", BS_PUSHBUTTON, 30, 253, 140, 28, IDC_BTN_MALL_ALL);
+    CreateCtrl(L"BUTTON", L"📋 商城白名單 (!mall 1)", BS_PUSHBUTTON, 178, 253, 145, 28, IDC_BTN_MALL_WHITE);
+    CreateCtrl(L"BUTTON", L"👑 平台至尊VIP (!vip 2)", BS_PUSHBUTTON, 330, 253, 150, 28, IDC_BTN_VIP_ALL);
+    CreateCtrl(L"BUTTON", L"❌ 關閉商城 (!mall 0)", BS_PUSHBUTTON, 488, 253, 140, 28, IDC_BTN_MALL_OFF);
+    g_hBtnAntiOver = CreateCtrl(L"BUTTON", L"🛡️ 防失敗保護 (目前: 開)", BS_PUSHBUTTON, 635, 253, 150, 28, IDC_BTN_ANTIOVER);
 
-    CreateCtrl(L"STATIC", L"地圖等級:", SS_LEFT, 30, 298, 70, 20, IDC_LBL_LEVEL);
-    g_hEditLevel = CreateCtrl(L"EDIT", L"99", WS_BORDER | ES_NUMBER, 105, 295, 60, 24, IDC_EDIT_LEVEL);
-    CreateCtrl(L"BUTTON", L"設定等級", BS_PUSHBUTTON, 175, 294, 90, 26, IDC_BTN_SET_LEVEL);
+    CreateCtrl(L"STATIC", L"地圖等級:", SS_LEFT, 30, 290, 70, 20, IDC_LBL_LEVEL);
+    g_hEditLevel = CreateCtrl(L"EDIT", L"99", WS_BORDER | ES_NUMBER, 105, 288, 60, 24, IDC_EDIT_LEVEL);
+    CreateCtrl(L"BUTTON", L"設定等級", BS_PUSHBUTTON, 175, 287, 85, 26, IDC_BTN_SET_LEVEL);
 
-    CreateCtrl(L"STATIC", L"商城隨機百分比 (%):", SS_LEFT, 290, 298, 140, 20, IDC_LBL_PERCENT);
-    g_hEditPercent = CreateCtrl(L"EDIT", L"30", WS_BORDER | ES_NUMBER, 435, 295, 55, 24, IDC_EDIT_PERCENT);
-    CreateCtrl(L"BUTTON", L"設定百分比 (模式3)", BS_PUSHBUTTON, 500, 294, 150, 26, IDC_BTN_SET_PERCENT);
-
-    // ==========================================
-    // 4. 自訂指令輸入 (Command Input)
-    // ==========================================
-    CreateCtrl(L"BUTTON", L"【自訂指令與 Native 呼叫】", BS_GROUPBOX, 15, 345, 790, 75, IDC_GRP_CMD);
-    g_hEditCmd = CreateCtrl(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, 30, 372, 630, 28, IDC_EDIT_CMD);
-    CreateCtrl(L"BUTTON", L"發送指令 (Enter)", BS_PUSHBUTTON, 670, 370, 120, 31, IDC_BTN_SEND_CMD);
+    CreateCtrl(L"STATIC", L"商城隨機百分比 (%):", SS_LEFT, 285, 290, 140, 20, IDC_LBL_PERCENT);
+    g_hEditPercent = CreateCtrl(L"EDIT", L"30", WS_BORDER | ES_NUMBER, 430, 288, 55, 24, IDC_EDIT_PERCENT);
+    CreateCtrl(L"BUTTON", L"設定百分比 (模式3)", BS_PUSHBUTTON, 495, 287, 140, 26, IDC_BTN_SET_PERCENT);
 
     // ==========================================
-    // 5. 即時控制台日誌 (Console Logs)
+    // 4. 英雄與選取單位增強 (Hero Manipulation)
     // ==========================================
-    CreateCtrl(L"BUTTON", L"【即時系統日誌與輸出】", BS_GROUPBOX, 15, 430, 790, 295, IDC_GRP_LOG);
+    CreateCtrl(L"BUTTON", L"【英雄與選取單位增強 (DzAPI 記憶體逆向)】", BS_GROUPBOX, 15, 328, 790, 68, IDC_GRP_HERO);
+    CreateCtrl(L"BUTTON", L"❤️ 生命全滿 (HEAL)", BS_PUSHBUTTON, 30, 353, 125, 28, IDC_BTN_HEAL);
+    CreateCtrl(L"BUTTON", L"💀 秒殺目標 (KILL)", BS_PUSHBUTTON, 162, 353, 125, 28, IDC_BTN_KILL);
+    CreateCtrl(L"BUTTON", L"🌟 技能點 +10", BS_PUSHBUTTON, 294, 353, 115, 28, IDC_BTN_ADD_SP10);
+    CreateCtrl(L"BUTTON", L"🌟 技能點 +50", BS_PUSHBUTTON, 416, 353, 115, 28, IDC_BTN_ADD_SP50);
+    CreateCtrl(L"BUTTON", L"💪 全屬性 +500", BS_PUSHBUTTON, 538, 353, 120, 28, IDC_BTN_ADD_STATS);
+    CreateCtrl(L"BUTTON", L"📖 經驗 +10000", BS_PUSHBUTTON, 665, 353, 120, 28, IDC_BTN_ADD_XP);
+
+    // ==========================================
+    // 5. 自訂指令輸入 (Command Input)
+    // ==========================================
+    CreateCtrl(L"BUTTON", L"【自訂指令與 Native 呼叫】", BS_GROUPBOX, 15, 404, 790, 70, IDC_GRP_CMD);
+    g_hEditCmd = CreateCtrl(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, 30, 430, 630, 28, IDC_EDIT_CMD);
+    CreateCtrl(L"BUTTON", L"發送指令 (Enter)", BS_PUSHBUTTON, 670, 429, 120, 30, IDC_BTN_SEND_CMD);
+
+    // ==========================================
+    // 6. 即時控制台日誌 (Console Logs)
+    // ==========================================
+    CreateCtrl(L"BUTTON", L"【即時系統日誌與輸出】", BS_GROUPBOX, 15, 482, 790, 305, IDC_GRP_LOG);
     g_hEditLog = CreateCtrl(L"EDIT", L"", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
-                            30, 455, 760, 225, IDC_EDIT_LOG);
+                            30, 507, 760, 235, IDC_EDIT_LOG);
 
-    CreateCtrl(L"BUTTON", L"🧹 清除日誌", BS_PUSHBUTTON, 30, 688, 110, 28, IDC_BTN_CLEAR_LOG);
-    CreateCtrl(L"BUTTON", L"📄 開啟 dztrace.log", BS_PUSHBUTTON, 150, 688, 140, 28, IDC_BTN_OPEN_TRACE);
-    CreateCtrl(L"BUTTON", L"📂 開啟 local_save.txt", BS_PUSHBUTTON, 300, 688, 150, 28, IDC_BTN_OPEN_SAVE);
-    CreateCtrl(L"BUTTON", L"📝 開啟 save_panel.txt", BS_PUSHBUTTON, 460, 688, 150, 28, IDC_BTN_OPEN_PANEL);
+    CreateCtrl(L"BUTTON", L"🧹 清除日誌", BS_PUSHBUTTON, 30, 748, 110, 28, IDC_BTN_CLEAR_LOG);
+    CreateCtrl(L"BUTTON", L"📄 開啟 dztrace.log", BS_PUSHBUTTON, 150, 748, 140, 28, IDC_BTN_OPEN_TRACE);
+    CreateCtrl(L"BUTTON", L"📂 開啟 local_save.txt", BS_PUSHBUTTON, 300, 748, 150, 28, IDC_BTN_OPEN_SAVE);
+    CreateCtrl(L"BUTTON", L"📝 開啟 save_panel.txt", BS_PUSHBUTTON, 460, 748, 150, 28, IDC_BTN_OPEN_PANEL);
 
     // Subclass Edit Controls for Enter key
     g_oldEditCmdProc = (WNDPROC)SetWindowLongPtr(g_hEditCmd, GWLP_WNDPROC, (LONG_PTR)EditCmdSubclassProc);
@@ -839,14 +894,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ShowWindow(g_hWnd, nCmdShow);
     UpdateWindow(g_hWnd);
 
-    AppendLog(L"=== Warcraft III JassHook 開發者輔助工具 v2.0 啟動完成 ===");
+    AppendLog(L"=== Warcraft III JassHook 開發者輔助工具 v2.0 (增強版) 啟動完成 ===");
     AppendLog(L"[*] 系統已具備 SeDebugPrivilege 管理員除錯權限。");
-    AppendLog(L"[*] 支援指令: !panel, !saveall, !mall <0-3>, !level <等級>, !antiover <0|1>, !kill, !<Native名稱>");
+    AppendLog(L"[*] 根據 DzAPI 逆向報告已啟用: 平台至尊VIP、英雄屬性/技能點修改、防結算失敗、商城全開。");
+    AppendLog(L"[*] 支援指令: !heal, !sp <點數>, !stats <屬性>, !xp <經驗>, !vip <0-2>, !panel, !saveall, !mall <0-3>, !kill");
 
-    // Trigger initial detection
     SendMessage(g_hWnd, WM_TIMER, IDT_TIMER_STATUS, 0);
 
-    // Message Loop
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
