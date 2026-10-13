@@ -73,6 +73,35 @@ void LoadMallWhitelist() {
     ConsoleLog(log);
 }
 
+std::unordered_set<std::string> g_mallBlacklist;
+
+void LoadMallBlacklist() {
+    g_mallBlacklist.clear();
+    g_mallBlacklist.insert("cheat");
+    g_mallBlacklist.insert("test");
+    g_mallBlacklist.insert("trap");
+    g_mallBlacklist.insert("BAN_CHECK");
+    g_mallBlacklist.insert("TEST_MALL_ITEM");
+
+    wchar_t blPath[MAX_PATH];
+    swprintf_s(blPath, MAX_PATH, L"%s\\mall_blacklist.txt", g_DllDirectory);
+    std::ifstream file(blPath);
+    std::string line;
+    while (std::getline(file, line)) {
+        if (!line.empty() && line[0] != '#') {
+            size_t last = line.find_last_not_of(" \n\r\t");
+            if (last != std::string::npos) {
+                line.erase(last + 1);
+            }
+            g_mallBlacklist.insert(line);
+        }
+    }
+    
+    char log[256];
+    sprintf_s(log, sizeof(log), "[MallBlacklist] Loaded %zu trap items from blacklist\n", g_mallBlacklist.size());
+    ConsoleLog(log);
+}
+
 struct InvokeData {
     void* func_ptr;
     const char* sig;
@@ -166,8 +195,10 @@ void* CreateThunk(int index, void* original_func) {
 // ==========================================
 // Native API Spoofer (VIP / Level / Mall)
 // ==========================================
-int g_MallMode = 1; // 0 = Off, 1 = Whitelist, 2 = All
-int g_MapLevel = 50;
+int g_MallMode = 2; // 0 = Off, 1 = Whitelist, 2 = All, 3 = Percentage
+int g_MallPercent = 30; // 1-100%
+int g_MapLevel = 99;
+int g_PreventGameOver = 1; // 1 = Block Defeat, 0 = Off
 
 int __cdecl Spoof_True() { return 1; }
 int __cdecl Spoof_LevelDynamic() { return g_MapLevel; }
@@ -184,6 +215,7 @@ HookData hkSave;
 HookData hkGet;
 HookData hkSetStat;
 HookData hkHasMallItem;
+HookData hkGameEnd;
 
 void RemoveTrampoline(HookData& data) {
     if (!data.targetPtr) return;
@@ -387,12 +419,36 @@ int __cdecl Monitor_HasMallItem(int player, DWORD key_ptr) {
     int originalResult = ((FuncType)hkHasMallItem.targetPtr)(player, key_ptr);
     RestoreTrampoline(hkHasMallItem, (void*)Monitor_HasMallItem);
 
-    // Spoof logic
+    // 1. Trap / Honeypot Blacklist check
+    if (keyStr && strcmp(keyStr, "(null)") != 0) {
+        std::string itemKey(keyStr);
+        if (g_mallBlacklist.find(itemKey) != g_mallBlacklist.end()) {
+            char log[256];
+            sprintf_s(log, sizeof(log), "[Trap Neutralized] Item \"%s\" is in blacklist! Spoofed to 0 (Denied).\n", keyStr);
+            ConsoleLog(log);
+            return 0;
+        }
+    }
+
+    // 2. Spoof logic
     extern int g_MallMode;
+    extern int g_MallPercent;
     int finalResult = originalResult;
     
     if (g_MallMode == 2) {
         finalResult = 1; // Spoof ALL items
+    } else if (g_MallMode == 3) {
+        // Percentage mode
+        if (keyStr) {
+            uint32_t hash = 2166136261u;
+            for (const char* p = keyStr; *p; ++p) {
+                hash ^= (uint8_t)*p;
+                hash *= 16777619u;
+            }
+            if ((int)(hash % 100) < g_MallPercent) {
+                finalResult = 1;
+            }
+        }
     } else if (g_MallMode == 1) {
         // Whitelist mode
         if (!g_mallWhitelist.empty() && keyStr) {
@@ -415,6 +471,22 @@ int __cdecl Monitor_HasMallItem(int player, DWORD key_ptr) {
     }
 
     return finalResult;
+}
+
+void __cdecl Monitor_DzPlatform_GameEnd(DWORD player, DWORD result) {
+    extern int g_PreventGameOver;
+    if (g_PreventGameOver > 0) {
+        char log[256];
+        sprintf_s(log, sizeof(log), "[AntiDefeat] BLOCKED DzPlatform_GameEnd(player: %u, result: %u)! Prevented map defeat.\n", player, result);
+        ConsoleLog(log);
+        return;
+    }
+    RemoveTrampoline(hkGameEnd);
+    typedef void(__cdecl *FuncType)(DWORD, DWORD);
+    if (hkGameEnd.targetPtr) {
+        ((FuncType)hkGameEnd.targetPtr)(player, result);
+    }
+    RestoreTrampoline(hkGameEnd, (void*)Monitor_DzPlatform_GameEnd);
 }
 
 void InstallSpoofHook(const char* nativeName, void* spoofFunc) {
@@ -474,9 +546,21 @@ DWORD CreateFakeJassString(const char* str) {
 
 struct SaveData {
     int player;
-    char key[64];
-    char val[64];
+    char key[256];
+    char val[512];
 };
+
+void FreeFakeJassString(DWORD jassStr) {
+    if (!jassStr) return;
+    FakeJassString* jStr = (FakeJassString*)jassStr;
+    if (jStr->data) {
+        if (jStr->data->chars) {
+            delete[] jStr->data->chars;
+        }
+        delete jStr->data;
+    }
+    delete jStr;
+}
 
 void KillSelectedUnit() {
     __try {
@@ -530,9 +614,17 @@ LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
         DWORD fakeKey = CreateFakeJassString(sd->key);
         DWORD fakeVal = CreateFakeJassString(sd->val);
         
-        ConsoleLog("[Invoker] Sending manual SAVE request...\n");
-        Monitor_SaveServerValue(sd->player, fakeKey, fakeVal);
+        char logBuf[512];
+        sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Sending manual SAVE request -> Player: %d | Key: \"%s\" | Value: \"%s\"\n", 
+                  sd->player, sd->key, sd->val);
+        ConsoleLog(logBuf);
         
+        int ret = Monitor_SaveServerValue(sd->player, fakeKey, fakeVal);
+        sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Manual SAVE returned: %d\n", ret);
+        ConsoleLog(logBuf);
+        
+        FreeFakeJassString(fakeKey);
+        FreeFakeJassString(fakeVal);
         delete sd;
         return 0;
     }
@@ -602,7 +694,7 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam) {
 
         bool connected = ConnectNamedPipe(hPipe, NULL) ? true : (GetLastError() == ERROR_PIPE_CONNECTED);
         if (connected) {
-            char buffer[256];
+            char buffer[1024];
             DWORD bytesRead;
             while (ReadFile(hPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL)) {
                 buffer[bytesRead] = '\0';
@@ -613,18 +705,49 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam) {
                     }
                 }
                 else if (strncmp(buffer, "SAVE:", 5) == 0) {
-                    char* ctx = nullptr;
-                    strtok_s(buffer, ":", &ctx); // Skip SAVE
-                    char* pStr = strtok_s(nullptr, ":", &ctx);
-                    char* kStr = strtok_s(nullptr, ":", &ctx);
-                    char* vStr = strtok_s(nullptr, ":", &ctx);
-                    if (pStr && kStr && vStr && g_gameHwnd) {
-                        SaveData* sd = new SaveData();
-                        sd->player = atoi(pStr);
-                        strncpy_s(sd->key, kStr, sizeof(sd->key));
-                        strncpy_s(sd->val, vStr, sizeof(sd->val));
-                        SendMessageA(g_gameHwnd, WM_APP + 3, 0, (LPARAM)sd);
+                    char* p1 = strchr(buffer, ':');
+                    if (p1) {
+                        char* p2 = strchr(p1 + 1, ':');
+                        if (p2) {
+                            char* p3 = strchr(p2 + 1, ':');
+                            if (p3 && g_gameHwnd) {
+                                *p2 = '\0';
+                                *p3 = '\0';
+                                char* pStr = p1 + 1;
+                                char* kStr = p2 + 1;
+                                char* vStr = p3 + 1;
+                                SaveData* sd = new SaveData();
+                                sd->player = atoi(pStr);
+                                strncpy_s(sd->key, sizeof(sd->key), kStr, _TRUNCATE);
+                                strncpy_s(sd->val, sizeof(sd->val), vStr, _TRUNCATE);
+                                SendMessageA(g_gameHwnd, WM_APP + 3, 0, (LPARAM)sd);
+                            }
+                        }
                     }
+                }
+                else if (strncmp(buffer, "MALL:", 5) == 0) {
+                    g_MallMode = atoi(buffer + 5);
+                    char log[128];
+                    sprintf_s(log, sizeof(log), "[Control] MallMode changed to: %d\n", g_MallMode);
+                    ConsoleLog(log);
+                }
+                else if (strncmp(buffer, "PERCENT:", 8) == 0) {
+                    g_MallPercent = atoi(buffer + 8);
+                    char log[128];
+                    sprintf_s(log, sizeof(log), "[Control] MallPercent changed to: %d%%\n", g_MallPercent);
+                    ConsoleLog(log);
+                }
+                else if (strncmp(buffer, "LEVEL:", 6) == 0) {
+                    g_MapLevel = atoi(buffer + 6);
+                    char log[128];
+                    sprintf_s(log, sizeof(log), "[Control] MapLevel changed to: %d\n", g_MapLevel);
+                    ConsoleLog(log);
+                }
+                else if (strncmp(buffer, "ANTIOVER:", 9) == 0) {
+                    g_PreventGameOver = atoi(buffer + 9);
+                    char log[128];
+                    sprintf_s(log, sizeof(log), "[Control] PreventGameOver changed to: %d\n", g_PreventGameOver);
+                    ConsoleLog(log);
                 }
                 else if (strncmp(buffer, "NATIVE:", 7) == 0) {
                     char* ctx = nullptr;
@@ -780,14 +903,18 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
         wchar_t iniPathW[MAX_PATH];
         swprintf_s(iniPathW, MAX_PATH, L"%s\\JassHookConfig.ini", g_DllDirectory);
         
-        g_MallMode = GetPrivateProfileIntW(L"Spoof", L"MallMode", 1, iniPathW);
-        g_MapLevel = GetPrivateProfileIntW(L"Spoof", L"MapLevel", 50, iniPathW);
+        g_MallMode = GetPrivateProfileIntW(L"Spoof", L"MallMode", 2, iniPathW);
+        g_MapLevel = GetPrivateProfileIntW(L"Spoof", L"MapLevel", 99, iniPathW);
+        g_MallPercent = GetPrivateProfileIntW(L"Spoof", L"MallPercent", 30, iniPathW);
+        g_PreventGameOver = GetPrivateProfileIntW(L"Spoof", L"PreventGameOver", 1, iniPathW);
         
         char cfgLog[256];
-        sprintf_s(cfgLog, sizeof(cfgLog), "  -> MallMode: %d (0=Off, 1=Whitelist, 2=All)\n  -> MapLevel: %d\n", g_MallMode, g_MapLevel);
+        sprintf_s(cfgLog, sizeof(cfgLog), "  -> MallMode: %d (0=Off, 1=Whitelist, 2=All, 3=Percent)\n  -> MallPercent: %d%%\n  -> MapLevel: %d\n  -> PreventGameOver: %d\n", 
+                  g_MallMode, g_MallPercent, g_MapLevel, g_PreventGameOver);
         ConsoleLog(cfgLog);
 
         LoadMallWhitelist();
+        LoadMallBlacklist();
 
         ConsoleLog("[Spoofer] Applying VIP / Mall / Level Spoofs...\n");
         if (g_MallMode > 0) {
@@ -800,6 +927,7 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
         InstallTrampolineHook("DzAPI_Map_SaveServerValue", (void*)Monitor_SaveServerValue, hkSave);
         InstallTrampolineHook("DzAPI_Map_GetServerValue", (void*)Monitor_GetServerValue, hkGet);
         InstallTrampolineHook("DzAPI_Map_Stat_SetStat", (void*)Monitor_Stat_SetStat, hkSetStat);
+        InstallTrampolineHook("DzPlatform_GameEnd", (void*)Monitor_DzPlatform_GameEnd, hkGameEnd);
         ConsoleLog("----------------------------------------\n");
     }
 

@@ -1,4 +1,4 @@
-﻿#include <windows.h>
+#include <windows.h>
 #include <iostream>
 #include <string>
 #include <sstream>
@@ -6,20 +6,23 @@
 #include <map>
 #include <vector>
 
-// [SUPPORTED MODDING] / [OFFICIAL]
-// War3JassDevTool - IPC Client (External Developer Console)
-
 void PrintMenu() {
     std::cout << "========================================================\n";
-    std::cout << " Warcraft III JASS & Native Developer Console\n";
+    std::cout << " Warcraft III JASS & Native 開發者控制台 v2.0\n";
     std::cout << "========================================================\n";
-    std::cout << " [璅∪ 1: JASS 單砍瑁] \n";
-    std::cout << " 湔亥撓亙啣鋆∠∪貊賣詨 (靘憒: Debug_TestFunction)\n\n";
-    std::cout << " [璅∪ 2: 摨撅 Native 澆 (Dynamic Invoker)] \n";
-    std::cout << " 隢典Ｗ銝 ! 蝚西嚗貊函征賡\n";
-    std::cout << " 靘憒: !PurchaseZeppelin\n";
-    std::cout << " 靘憒: !scan_dzapi  (寞隞歹 War3Plugin 閮園)\n";
-    std::cout << " 靘憒: !SuicideUnit 123 456\n";
+    std::cout << " [存檔相關指令]\n";
+    std::cout << "  !panel            : 從 local_save.txt 產生 save_panel.txt 並用記事本開啟修改\n";
+    std::cout << "  !saveall          : 將 save_panel.txt 內的修改批量寫入回遊戲伺服器\n";
+    std::cout << "  !save <P> <K> <V> : 手動發送單筆存檔 (例: !save 1048584 Isuipian1 999)\n\n";
+    std::cout << " [遊戲與商城動態控制]\n";
+    std::cout << "  !mall <0|1|2|3>   : 切換商城模式 (0=原廠關閉, 1=白名單, 2=全開, 3=百分比)\n";
+    std::cout << "  !percent <1~100>  : 設定商城隨機開啟百分比 (僅模式3生效)\n";
+    std::cout << "  !level <等級>     : 動態偽造地圖等級 (例: !level 99)\n";
+    std::cout << "  !antiover <0|1>   : 切換防作弊遊戲失敗/結算阻擋保護 (1=開啟, 0=關閉)\n";
+    std::cout << "  !kill             : 秒殺當前選取的單位 (HP歸零)\n\n";
+    std::cout << " [動態 Native 呼叫]\n";
+    std::cout << "  !<Native名稱> <參數1> <參數2> ... (例: !SuicideUnit 123 456)\n";
+    std::cout << "  !help             : 重新顯示此選單\n";
     std::cout << "========================================================\n";
 }
 
@@ -41,34 +44,49 @@ int main() {
         if (hPipe != INVALID_HANDLE_VALUE) {
             break;
         }
-        std::cout << "Waiting for Warcraft III JassHook Pipe...\n";
+        std::cout << "等待魔獸爭霸 JassHook 連線 (請先注入 JassHook.dll)...\n";
         Sleep(2000);
     }
     
-    std::cout << "[IPC] Connected to Warcraft III successfully!\n";
+    std::cout << "[IPC] 已成功連線至魔獸爭霸！\n";
 
     std::string input;
     while (true) {
-        std::cout << "\n> Command ('exit' to quit): ";
+        std::cout << "\n> Command ('exit' 離開): ";
         std::getline(std::cin, input);
         
         if (input == "exit") break;
         if (input.empty()) continue;
         
-        // 蝘駁 \r  \n
         while (!input.empty() && (input.back() == '\r' || input.back() == '\n')) {
             input.pop_back();
         }
         if (input.empty()) continue;
         
-        // 閫 Native 隞 (! )
         if (input == "!kill" || input == "!killselected") {
             input = "KILL";
+        }
+        else if (input == "!help") {
+            PrintMenu();
+            continue;
+        }
+        else if (input.rfind("!mall ", 0) == 0) {
+            input = "MALL:" + input.substr(6);
+        }
+        else if (input.rfind("!percent ", 0) == 0) {
+            input = "PERCENT:" + input.substr(9);
+        }
+        else if (input.rfind("!level ", 0) == 0) {
+            input = "LEVEL:" + input.substr(7);
+        }
+        else if (input.rfind("!antiover ", 0) == 0) {
+            input = "ANTIOVER:" + input.substr(10);
         }
         else if (input == "!panel") {
             std::ifstream infile("local_save.txt");
             if (!infile.is_open()) {
-                std::cout << "[-] 無法讀取存檔紀錄，找不到 local_save.txt\n";
+                std::cout << "[-] 無法讀取存檔紀錄，找不到 local_save.txt (請先在遊戲中載入存檔)\n";
+                continue;
             }
             std::map<std::pair<std::string, std::string>, std::string> uniqueKeys;
             std::string line;
@@ -117,14 +135,14 @@ int main() {
             }
             outfile.close();
 
-            std::cout << "[Panel] 已產生 save_panel.txt，為您自動開啟...\n";
+            std::cout << "[Panel] 已產生 save_panel.txt (共 " << uniqueKeys.size() << " 筆數據)，為您自動開啟...\n";
             system("notepad save_panel.txt");
             continue;
         }
         else if (input == "!saveall") {
             std::ifstream pfile("save_panel.txt");
             if (!pfile.is_open()) {
-                std::cout << "[-] 曆 save_panel.txt嚗隢頛詨 !panel Ｙ\n";
+                std::cout << "[-] 找不到 save_panel.txt，請先輸入 !panel 生成\n";
                 continue;
             }
             std::string line;
@@ -140,23 +158,32 @@ int main() {
                     
                     std::string payload = "SAVE:" + p + ":" + k + ":" + v;
                     DWORD bw;
-                    WriteFile(hPipe, payload.c_str(), payload.length(), &bw, NULL);
-                    std::cout << "[IPC] Sent: " << payload << "\n";
+                    WriteFile(hPipe, payload.c_str(), (DWORD)payload.length(), &bw, NULL);
+                    std::cout << "[IPC] 已發送: " << payload << "\n";
                     count++;
-                    Sleep(20); // 脫揪璈
+                    Sleep(20);
                 }
             }
             pfile.close();
-            std::cout << "[+] 寞活潮 " << count << " 蝑摮瑼蝝嚗\n";
+            std::cout << "[+] 批量存檔完成，共送出 " << count << " 筆指令！\n";
             continue;
         }
         else if (input.rfind("!save ", 0) == 0) {
-            std::stringstream ss(input.substr(6));
-            std::string p, k, v;
-            if (ss >> p >> k >> v) {
-                input = "SAVE:" + p + ":" + k + ":" + v;
+            std::string rest = input.substr(6);
+            std::stringstream ss(rest);
+            std::string p, k;
+            if (ss >> p >> k) {
+                std::string v;
+                std::getline(ss, v);
+                while (!v.empty() && v.front() == ' ') v.erase(v.begin());
+                if (!v.empty()) {
+                    input = "SAVE:" + p + ":" + k + ":" + v;
+                } else {
+                    std::cout << "[-] 格式錯誤: 必須提供數值！正確格式: !save <PlayerID> <Key> <Value>\n";
+                    continue;
+                }
             } else {
-                std::cout << "[-] 澆航炊嚗甇蝣箸澆: !save <PlayerID> <Key> <Value>\n";
+                std::cout << "[-] 格式錯誤: !save <PlayerID> <Key> <Value>\n";
                 continue;
             }
         }
@@ -175,12 +202,12 @@ int main() {
         }
         
         DWORD bytesWritten;
-        bool success = WriteFile(hPipe, input.c_str(), input.length(), &bytesWritten, NULL);
+        bool success = WriteFile(hPipe, input.c_str(), (DWORD)input.length(), &bytesWritten, NULL);
         
         if (success) {
-            std::cout << "[IPC] Sent: " << input << std::endl;
+            std::cout << "[IPC] 已發送指令: " << input << std::endl;
         } else {
-            std::cout << "[-] Failed to send command. Pipe might be closed.\n";
+            std::cout << "[-] 發送指令失敗，Named Pipe 可能已中斷。\n";
             break;
         }
     }
