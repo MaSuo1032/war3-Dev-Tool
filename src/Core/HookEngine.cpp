@@ -11,15 +11,15 @@ bool PatchHook::Install(void* target, void* hook) {
     m_hook = hook;
 
     // Backup original 5 bytes
-    {
-        ScopedProtect protect(m_target, 5);
-        memcpy(m_originalBytes, m_target, 5);
+    DWORD oldProtect;
+    VirtualProtect(m_target, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
+    memcpy(m_originalBytes, m_target, 5);
 
-        BYTE jmp[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
-        DWORD relAddr = reinterpret_cast<DWORD>(m_hook) - (reinterpret_cast<DWORD>(m_target) + 5);
-        memcpy(&jmp[1], &relAddr, 4);
-        memcpy(m_target, jmp, 5);
-    }
+    BYTE jmp[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
+    DWORD relAddr = reinterpret_cast<DWORD>(m_hook) - (reinterpret_cast<DWORD>(m_target) + 5);
+    memcpy(&jmp[1], &relAddr, 4);
+    memcpy(m_target, jmp, 5);
+    VirtualProtect(m_target, 5, oldProtect, &oldProtect);
 
     FlushInstructionCache(GetCurrentProcess(), m_target, 5);
     m_installed = true;
@@ -29,19 +29,23 @@ bool PatchHook::Install(void* target, void* hook) {
 void PatchHook::Unhook() {
     if (!m_target || !m_installed) return;
 
-    ScopedProtect protect(m_target, 5);
+    DWORD oldProtect;
+    VirtualProtect(m_target, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
     memcpy(m_target, m_originalBytes, 5);
+    VirtualProtect(m_target, 5, oldProtect, &oldProtect);
     FlushInstructionCache(GetCurrentProcess(), m_target, 5);
 }
 
 void PatchHook::Rehook() {
     if (!m_target || !m_installed) return;
 
-    ScopedProtect protect(m_target, 5);
+    DWORD oldProtect;
+    VirtualProtect(m_target, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
     BYTE jmp[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
     DWORD relAddr = reinterpret_cast<DWORD>(m_hook) - (reinterpret_cast<DWORD>(m_target) + 5);
     memcpy(&jmp[1], &relAddr, 4);
     memcpy(m_target, jmp, 5);
+    VirtualProtect(m_target, 5, oldProtect, &oldProtect);
     FlushInstructionCache(GetCurrentProcess(), m_target, 5);
 }
 
@@ -56,13 +60,13 @@ bool HookEngine::InstallSpoof(const std::string& name, void* targetFunc, void* s
         return false;
     }
 
-    {
-        ScopedProtect protect(targetFunc, 5);
-        BYTE jmp[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
-        DWORD relAddr = reinterpret_cast<DWORD>(spoofFunc) - (reinterpret_cast<DWORD>(targetFunc) + 5);
-        memcpy(&jmp[1], &relAddr, 4);
-        memcpy(targetFunc, jmp, 5);
-    }
+    DWORD oldProtect;
+    VirtualProtect(targetFunc, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
+    BYTE jmp[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
+    DWORD relAddr = reinterpret_cast<DWORD>(spoofFunc) - (reinterpret_cast<DWORD>(targetFunc) + 5);
+    memcpy(&jmp[1], &relAddr, 4);
+    memcpy(targetFunc, jmp, 5);
+    VirtualProtect(targetFunc, 5, oldProtect, &oldProtect);
 
     FlushInstructionCache(GetCurrentProcess(), targetFunc, 5);
     LOG("[HookEngine] Spoof installed for '%s' (0x%p -> 0x%p)\n", name.c_str(), targetFunc, spoofFunc);

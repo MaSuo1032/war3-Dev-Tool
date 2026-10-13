@@ -59,15 +59,28 @@ static LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         return 0;
     }
 
-    return CallWindowProcA(s_origWndProc, hWnd, uMsg, wParam, lParam);
+    if (s_origWndProc) {
+        return CallWindowProcA(s_origWndProc, hWnd, uMsg, wParam, lParam);
+    }
+    return DefWindowProcA(hWnd, uMsg, wParam, lParam);
 }
 
 static DWORD WINAPI MainThread(LPVOID lpParam) {
+    HMODULE hModule = reinterpret_cast<HMODULE>(lpParam);
+    Config::Get().Initialize(hModule);
     Logger::Get().Initialize();
 
     LOG("========================================================\n");
     LOG(" Warcraft III JASS Dev Tool v2.0 (Modern Modular Core)\n");
     LOG("========================================================\n");
+
+    // Clear local_save.txt on startup
+    std::wstring savePath = Config::Get().GetFilePath(L"local_save.txt");
+    FILE* fp = nullptr;
+    if (_wfopen_s(&fp, savePath.c_str(), L"w") == 0 && fp) {
+        fputs("=== Warcraft III Local Save Log ===\n", fp);
+        fclose(fp);
+    }
 
     // Wait for Game.dll
     HMODULE hGame = GetModuleHandleA("Game.dll");
@@ -80,13 +93,10 @@ static DWORD WINAPI MainThread(LPVOID lpParam) {
     NativeRegistry::Get().Initialize(hGame);
 
     HMODULE hPlugin = GetModuleHandleA("War3Plugin.dll");
-    NativeRegistry::Get().PrepopulateFromModules(hGame, hPlugin);
-
-    // Initialize Anti-Defeat
-    AntiDefeat::Get().Initialize();
-
-    // Initialize Modules if DzAPI is available
     if (hPlugin) {
+        NativeRegistry::Get().PrepopulateFromModules(hGame, hPlugin);
+
+        // Initialize Modules if DzAPI is available
         MallSpoofer::Get().Initialize();
         SaveManager::Get().Initialize();
     }
@@ -114,7 +124,6 @@ static DWORD WINAPI MainThread(LPVOID lpParam) {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        War3Dev::Config::Get().Initialize(hModule);
         CreateThread(NULL, 0, War3Dev::MainThread, hModule, 0, NULL);
     }
     return TRUE;

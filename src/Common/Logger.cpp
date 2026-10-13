@@ -33,6 +33,13 @@ void Logger::Log(const char* fmt, ...) {
         WriteConsoleA(hStdOut, buffer, (DWORD)strlen(buffer), &written, NULL);
     }
     OutputDebugStringA(buffer);
+
+    std::wstring logPath = Config::Get().GetFilePath(L"dztrace.log");
+    FILE* fp = nullptr;
+    if (_wfopen_s(&fp, logPath.c_str(), L"a") == 0 && fp) {
+        fputs(buffer, fp);
+        fclose(fp);
+    }
 }
 
 void Logger::LogSave(const char* fmt, ...) {

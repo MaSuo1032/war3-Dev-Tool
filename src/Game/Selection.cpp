@@ -30,9 +30,20 @@ void Selection::KillSelectedUnit() {
         DWORD selectedUnit = *reinterpret_cast<DWORD*>(firstNode + 0x08);
         if (!selectedUnit) return;
 
-        // Set Unit HP to 0.0f (Offset +0x130 is HP in 1.27a unit structure)
-        *reinterpret_cast<float*>(selectedUnit + 0x130) = 0.0f;
-        LOG("[Selection] KillSelectedUnit executed successfully on Unit 0x%X!\n", selectedUnit);
+        DWORD hpIndex = *reinterpret_cast<DWORD*>(selectedUnit + 0xA0); // UNIT_HP_INDEX_OFF
+        
+        DWORD thisGame = *reinterpret_cast<DWORD*>(WAR3_GAME_DLL_BASE + THIS_GAME_RVA);
+        if (!thisGame) return;
+        DWORD gameMemory = *reinterpret_cast<DWORD*>(thisGame + 0x0C);
+        if (!gameMemory) return;
+
+        DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
+        DWORD address1 = *reinterpret_cast<DWORD*>(entryAddress);
+        if (!address1) return;
+
+        float* hpValue = reinterpret_cast<float*>(address1 + 0x78);
+        *hpValue = 0.0f; // INSTAKILL
+        LOG("[Selection] Instantly killed selected unit (0x%X)!\n", selectedUnit);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         LOG("[Selection] Exception in KillSelectedUnit!\n");
     }

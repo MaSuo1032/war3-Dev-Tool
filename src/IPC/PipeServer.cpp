@@ -121,7 +121,7 @@ void PipeServer::Run() {
                         if (info && m_hGameWnd) {
                             InvokePayload* payload = new InvokePayload();
                             payload->funcPtr = info->funcPtr;
-                            strncpy_s(payload->sig, sizeof(payload->sig), info->signature.c_str(), _TRUNCATE);
+                            strncpy_s(payload->sig, sizeof(payload->sig), info->signature, _TRUNCATE);
                             strncpy_s(payload->arg1, sizeof(payload->arg1), arg1 ? arg1 : "", _TRUNCATE);
                             strncpy_s(payload->arg2, sizeof(payload->arg2), arg2 ? arg2 : "", _TRUNCATE);
                             strncpy_s(payload->arg3, sizeof(payload->arg3), arg3 ? arg3 : "", _TRUNCATE);

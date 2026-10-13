@@ -8,8 +8,8 @@
 namespace War3Dev {
 
 struct NativeInfo {
-    std::string name;
-    std::string signature;
+    char name[64];
+    char signature[64];
     void* funcPtr;
 };
 
@@ -25,15 +25,16 @@ public:
     void Register(const char* name, const char* sig, void* funcPtr);
     const NativeInfo* Find(const char* name) const;
 
-    size_t GetCount() const;
+    size_t GetCount() const { return m_nativeCount; }
 
 private:
     NativeRegistry() = default;
 
     static void __fastcall HookedRegisterNative(void* func_ptr, const char* name, const char* signature);
 
-    std::unordered_map<std::string, NativeInfo> m_natives;
-    mutable std::mutex m_mutex;
+    static constexpr size_t MAX_NATIVES = 2048;
+    NativeInfo m_natives[MAX_NATIVES];
+    size_t m_nativeCount = 0;
 
     RegisterNative_t m_origRegisterNative = nullptr;
     BYTE m_origBytes[5] = { 0 };

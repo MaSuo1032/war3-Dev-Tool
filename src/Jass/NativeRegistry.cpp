@@ -14,27 +14,23 @@ NativeRegistry& NativeRegistry::Get() {
 }
 
 void __fastcall NativeRegistry::HookedRegisterNative(void* func_ptr, const char* name, const char* signature) {
-    if (s_instance) {
-        // Temporarily unhook to invoke real RegisterNative
-        {
-            ScopedProtect protect(s_instance->m_hookTarget, 5);
-            memcpy(s_instance->m_hookTarget, s_instance->m_origBytes, 5);
-        }
+    if (!s_instance || !s_instance->m_hookTarget) return;
 
-        s_instance->Register(name, signature, func_ptr);
+    DWORD oldProtect;
+    VirtualProtect(s_instance->m_hookTarget, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
+    memcpy(s_instance->m_hookTarget, s_instance->m_origBytes, 5);
+    VirtualProtect(s_instance->m_hookTarget, 5, oldProtect, &oldProtect);
 
-        // Call original RegisterNative
-        s_instance->m_origRegisterNative(func_ptr, name, signature);
+    s_instance->Register(name, signature, func_ptr);
 
-        // Rehook
-        {
-            ScopedProtect protect(s_instance->m_hookTarget, 5);
-            BYTE jmp[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
-            DWORD relAddr = reinterpret_cast<DWORD>(HookedRegisterNative) - (reinterpret_cast<DWORD>(s_instance->m_hookTarget) + 5);
-            memcpy(&jmp[1], &relAddr, 4);
-            memcpy(s_instance->m_hookTarget, jmp, 5);
-        }
-    }
+    s_instance->m_origRegisterNative(func_ptr, name, signature);
+
+    VirtualProtect(s_instance->m_hookTarget, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
+    BYTE jmp[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
+    DWORD relAddr = reinterpret_cast<DWORD>(HookedRegisterNative) - (reinterpret_cast<DWORD>(s_instance->m_hookTarget) + 5);
+    memcpy(&jmp[1], &relAddr, 4);
+    memcpy(s_instance->m_hookTarget, jmp, 5);
+    VirtualProtect(s_instance->m_hookTarget, 5, oldProtect, &oldProtect);
 }
 
 void NativeRegistry::Initialize(HMODULE hGame) {
@@ -43,60 +39,50 @@ void NativeRegistry::Initialize(HMODULE hGame) {
     m_hookTarget = reinterpret_cast<void*>(reinterpret_cast<DWORD>(hGame) + REGISTER_NATIVE_RVA);
     m_origRegisterNative = reinterpret_cast<RegisterNative_t>(m_hookTarget);
 
+    DWORD oldProtect;
+    VirtualProtect(m_hookTarget, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
     memcpy(m_origBytes, m_hookTarget, 5);
 
-    {
-        ScopedProtect protect(m_hookTarget, 5);
-        BYTE jmp[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
-        DWORD relAddr = reinterpret_cast<DWORD>(HookedRegisterNative) - (reinterpret_cast<DWORD>(m_hookTarget) + 5);
-        memcpy(&jmp[1], &relAddr, 4);
-        memcpy(m_hookTarget, jmp, 5);
-    }
+    BYTE jmp[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
+    DWORD relAddr = reinterpret_cast<DWORD>(HookedRegisterNative) - (reinterpret_cast<DWORD>(m_hookTarget) + 5);
+    memcpy(&jmp[1], &relAddr, 4);
+    memcpy(m_hookTarget, jmp, 5);
+    VirtualProtect(m_hookTarget, 5, oldProtect, &oldProtect);
 
     FlushInstructionCache(GetCurrentProcess(), m_hookTarget, 5);
     LOG("[NativeRegistry] RegisterNative hooked at 0x%p\n", m_hookTarget);
 }
 
 void NativeRegistry::PrepopulateFromModules(HMODULE hGame, HMODULE hPlugin) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-
-    if (hGame) {
-        for (size_t i = 0; i < g_blizzardNativesCount; ++i) {
-            void* ptr = reinterpret_cast<void*>(reinterpret_cast<DWORD>(hGame) + g_blizzardNatives[i].rva);
-            m_natives[g_blizzardNatives[i].name] = { g_blizzardNatives[i].name, g_blizzardNatives[i].sig, ptr };
-        }
-    }
-
     if (hPlugin) {
-        for (int i = 0; i < g_dzTableCount; ++i) {
+        LOG("[NativeRegistry] Pre-populating DzAPI handles from static registry...\n");
+        for (int i = 0; i < g_dzTableCount && m_nativeCount < MAX_NATIVES; ++i) {
             void* ptr = reinterpret_cast<void*>(reinterpret_cast<DWORD>(hPlugin) + g_dzTable[i].rva);
-            m_natives[g_dzTable[i].name] = { g_dzTable[i].name, g_dzTable[i].sig, ptr };
+            Register(g_dzTable[i].name, g_dzTable[i].sig, ptr);
         }
     }
 
-    LOG("[NativeRegistry] Prepopulated with %zu Blizzard & %d DzAPI entries.\n", 
-        g_blizzardNativesCount, hPlugin ? g_dzTableCount : 0);
+    LOG("[NativeRegistry] Prepopulated with %zu DzAPI entries.\n", m_nativeCount);
 }
 
 void NativeRegistry::Register(const char* name, const char* sig, void* funcPtr) {
     if (!name || !funcPtr) return;
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_natives[name] = { name, sig ? sig : "", funcPtr };
+    if (m_nativeCount < MAX_NATIVES) {
+        strncpy_s(m_natives[m_nativeCount].name, sizeof(m_natives[m_nativeCount].name), name, _TRUNCATE);
+        strncpy_s(m_natives[m_nativeCount].signature, sizeof(m_natives[m_nativeCount].signature), sig ? sig : "", _TRUNCATE);
+        m_natives[m_nativeCount].funcPtr = funcPtr;
+        m_nativeCount++;
+    }
 }
 
 const NativeInfo* NativeRegistry::Find(const char* name) const {
     if (!name) return nullptr;
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_natives.find(name);
-    if (it != m_natives.end()) {
-        return &it->second;
+    for (size_t i = 0; i < m_nativeCount; ++i) {
+        if (strcmp(m_natives[i].name, name) == 0) {
+            return &m_natives[i];
+        }
     }
     return nullptr;
-}
-
-size_t NativeRegistry::GetCount() const {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    return m_natives.size();
 }
 
 } // namespace War3Dev

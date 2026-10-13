@@ -12,16 +12,12 @@ public:
     void Initialize();
     void ReloadLists();
 
-    bool IsTrapItem(const std::string& key) const;
-    bool IsValidMallItemKey(const std::string& key) const;
-
 private:
     MallSpoofer() = default;
 
     static int __cdecl Hook_HasMallItem(int player, DWORD key_ptr);
-    static int __cdecl Hook_IsVIP(int player);
-    static int __cdecl Hook_GetMapLevel(int player);
-    static int __cdecl Hook_GetServerValueErrorCode(int player);
+    static int __cdecl Hook_IsVIP();
+    static int __cdecl Hook_GetMapLevel();
 
     std::unordered_set<std::string> m_blacklist;
     std::unordered_set<std::string> m_whitelist;
