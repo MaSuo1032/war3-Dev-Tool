@@ -1,0 +1,31 @@
+# Build directories
+build/
+bin/
+out/
+.vs/
+*.user
+*.suo
+*.VC.db
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+Makefile
+
+# Compiled binaries & libraries
+*.obj
+*.o
+*.lib
+*.a
+*.exp
+*.ilk
+*.pdb
+*.idb
+
+# Game runtime logs & generated panels
+local_save.txt
+save_panel.txt
+dztrace.log
+dz_api.log

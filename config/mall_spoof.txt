@@ -1,0 +1,13 @@
+# ==========================================
+# 商城道具自訂白名單 (MallMode = 1 時生效)
+# 每行一個道具名稱 (例如: BFK, VIP1, CLNW)
+# ==========================================
+VIP1
+VIP2
+VIP3
+BFK
+CLNW
+SWORD_GOD
+WING_ANGEL
+GOLD_PASS
+TITLE_MASTER
