@@ -34,3 +34,13 @@ add_executable(Injector
 if(MSVC)
     set_target_properties(Injector PROPERTIES LINK_FLAGS "/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\"")
 endif()
+
+# 4. All-in-One GUI Client (Injector + Dev Tool Panel)
+add_executable(War3DevToolUI WIN32
+    src/gui.cpp
+)
+target_link_libraries(War3DevToolUI PRIVATE user32 kernel32 gdi32 comctl32 shell32 advapi32)
+if(MSVC)
+    set_target_properties(War3DevToolUI PROPERTIES LINK_FLAGS "/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\"")
+endif()
+
