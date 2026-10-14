@@ -71,8 +71,9 @@ inline bool ParseSaveLine(const std::string& rawLine, const std::string& defPid,
         }
         TrimSaveString(outKey);
 
-        // Extract Value
-        size_t vPos = line.find("Value");
+        // Extract Value (MUST search after the key to avoid matching 'Value' inside '[GetServerValue]' or '[SaveServerValue]')
+        size_t searchValFrom = (q2 != std::string::npos) ? (q2 + 1) : (kPos + 3);
+        size_t vPos = line.find("Value", searchValFrom);
         if (vPos != std::string::npos) {
             size_t q3 = line.find('"', vPos);
             size_t q4 = (q3 != std::string::npos) ? line.find('"', q3 + 1) : std::string::npos;
@@ -122,7 +123,9 @@ inline bool ParseSaveLine(const std::string& rawLine, const std::string& defPid,
         TrimSaveString(outPid);
         TrimSaveString(outKey);
         TrimSaveString(outVal);
-        if (!outKey.empty() && !outVal.empty()) {
+        if (!outKey.empty() && !outVal.empty() && 
+            outPid.find('[') == std::string::npos && outPid.find('|') == std::string::npos && 
+            outKey.find('|') == std::string::npos) {
             if (outPid.empty()) outPid = defPid;
             return true;
         }
@@ -138,7 +141,9 @@ inline bool ParseSaveLine(const std::string& rawLine, const std::string& defPid,
             TrimSaveString(outPid);
             TrimSaveString(outKey);
             TrimSaveString(outVal);
-            if (!outKey.empty() && !outVal.empty()) {
+            if (!outKey.empty() && !outVal.empty() && 
+                outPid.find('[') == std::string::npos && outPid.find('|') == std::string::npos && 
+                outKey.find('|') == std::string::npos) {
                 if (outPid.empty()) outPid = defPid;
                 return true;
             }

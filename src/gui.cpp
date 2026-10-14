@@ -258,6 +258,9 @@ void GenerateAndOpenPanel() {
     while (std::getline(infile, line)) {
         std::string p, k, v;
         if (ParseSaveLine(line, "1048602", p, k, v)) {
+            if (k == v && !isdigit((unsigned char)k[0])) {
+                continue;
+            }
             uniqueKeys[{p, k}] = v;
             if (detectedPid.empty()) detectedPid = p;
         }
@@ -706,6 +709,9 @@ void LoadExistingSavesFromFile() {
 
         std::string pid, key, val;
         if (ParseSaveLine(line, defPid, pid, key, val)) {
+            if (key == val && !isdigit((unsigned char)key[0])) {
+                continue;
+            }
             if (detectedPid.empty() && !pid.empty()) detectedPid = pid;
 
             std::string actionStr = "讀取 (GET)";
