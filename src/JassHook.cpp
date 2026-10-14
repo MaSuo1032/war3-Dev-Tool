@@ -15,7 +15,7 @@ HMODULE g_hModule = NULL;
 wchar_t g_DllDirectory[MAX_PATH] = {0};
 
 
-const DWORD GAME_DLL_BASE = 0x6F000000;
+DWORD g_gameBase = 0x6F000000;
 const DWORD REGISTER_NATIVE_RVA = 0x7E3710;
 
 typedef void(__fastcall *RegisterNative_t)(void* func_ptr, const char* name, const char* signature);
@@ -95,6 +95,15 @@ void LoadMallBlacklist() {
     g_mallBlacklist.insert("trap");
     g_mallBlacklist.insert("BAN_CHECK");
     g_mallBlacklist.insert("TEST_MALL_ITEM");
+    g_mallBlacklist.insert("ecn3gHnB95");
+    g_mallBlacklist.insert("J");
+    g_mallBlacklist.insert("C");
+    g_mallBlacklist.insert("D");
+    g_mallBlacklist.insert("E");
+    g_mallBlacklist.insert("F");
+    g_mallBlacklist.insert("M");
+    g_mallBlacklist.insert("P");
+    g_mallBlacklist.insert("I");
 
     wchar_t blPath[MAX_PATH];
     swprintf_s(blPath, MAX_PATH, L"%s\\mall_blacklist.txt", g_DllDirectory);
@@ -113,6 +122,26 @@ void LoadMallBlacklist() {
     char log[256];
     sprintf_s(log, sizeof(log), "[MallBlacklist] Loaded %zu trap items from blacklist\n", g_mallBlacklist.size());
     ConsoleLog(log);
+}
+
+bool IsTrapHoneypot(const char* keyStr) {
+    if (!keyStr || strcmp(keyStr, "(null)") == 0 || keyStr[0] == '\0') return true;
+    size_t len = strlen(keyStr);
+    if (len <= 2) return true;
+    if (strcmp(keyStr, "ecn3gHnB95") == 0) return true;
+    if (g_mallBlacklist.find(keyStr) != g_mallBlacklist.end()) return true;
+    
+    std::string lower = keyStr;
+    for (char& c : lower) c = (char)tolower(c);
+    if (lower.find("trap") != std::string::npos ||
+        lower.find("test") != std::string::npos ||
+        lower.find("cheat") != std::string::npos ||
+        lower.find("ban_") != std::string::npos ||
+        lower.find("fake") != std::string::npos ||
+        lower.find("honeypot") != std::string::npos) {
+        return true;
+    }
+    return false;
 }
 
 struct InvokeData {
@@ -436,14 +465,11 @@ int __cdecl Monitor_HasMallItem(int player, DWORD key_ptr) {
     RestoreTrampoline(hkHasMallItem, (void*)Monitor_HasMallItem);
 
     // 1. Trap / Honeypot Blacklist check
-    if (keyStr && strcmp(keyStr, "(null)") != 0) {
-        std::string itemKey(keyStr);
-        if (g_mallBlacklist.find(itemKey) != g_mallBlacklist.end()) {
-            char log[256];
-            sprintf_s(log, sizeof(log), "[Trap Neutralized] Item \"%s\" is in blacklist! Spoofed to 0 (Denied).\n", keyStr);
-            ConsoleLog(log);
-            return 0;
-        }
+    if (IsTrapHoneypot(keyStr)) {
+        char log[256];
+        sprintf_s(log, sizeof(log), "[Trap Neutralized] Item \"%s\" is Honeypot/Trap! Spoofed to 0 (Denied).\n", keyStr ? keyStr : "(null)");
+        ConsoleLog(log);
+        return 0;
     }
 
     // 2. Spoof logic
@@ -451,7 +477,9 @@ int __cdecl Monitor_HasMallItem(int player, DWORD key_ptr) {
     extern int g_MallPercent;
     int finalResult = originalResult;
     
-    if (g_MallMode == 2) {
+    if (g_MallMode == 0) {
+        finalResult = originalResult;
+    } else if (g_MallMode == 2) {
         finalResult = 1; // Spoof ALL items
     } else if (g_MallMode == 3) {
         // Percentage mode
@@ -588,46 +616,90 @@ void RegisterCommand(const std::string& name, CommandHandler handler) {
     g_commandMap[name] = handler;
 }
 
-DWORD GetTargetUnit() {
-    DWORD gameBase = 0x6F000000;
-    DWORD targetUnit = 0;
-    
-    // 1. Try selected unit first (CGameWar3 + 0x58 -> CPlayerWar3 -> selection list)
-    DWORD* pGame = (DWORD*)(gameBase + 0xBE4238);
-    if (pGame && *pGame) {
-        DWORD pGameWar3 = *pGame;
-        DWORD playerId = *(DWORD*)(pGameWar3 + 0x28);
-        if (playerId < 16) {
-            DWORD player = *(DWORD*)(pGameWar3 + 0x58 + playerId * 4);
-            if (player) {
-                DWORD listRoot = *(DWORD*)(player + 0x34);
-                if (listRoot) {
-                    DWORD listHead = *(DWORD*)(listRoot + 0x1F0);
-                    if (listHead) {
+void SaveConfigValue(const wchar_t* key, int value) {
+    wchar_t iniPathW[MAX_PATH];
+    swprintf_s(iniPathW, MAX_PATH, L"%s\\JassHookConfig.ini", g_DllDirectory);
+    wchar_t valStr[32];
+    swprintf_s(valStr, 32, L"%d", value);
+    WritePrivateProfileStringW(L"Spoof", key, valStr, iniPathW);
+}
+
+DWORD GetTargetUnitHandle() {
+    HMODULE hPlugin = GetModuleHandleA("War3Plugin.dll");
+    if (hPlugin) {
+        typedef DWORD(__cdecl *DzGetUnit_t)();
+        auto fnLeader = (DzGetUnit_t)((BYTE*)hPlugin + 0xD9840); // DzGetSelectedLeaderUnit
+        DWORD hUnit = fnLeader();
+        if (hUnit) return hUnit;
+
+        typedef DWORD(__cdecl *DzGetUnitIdx_t)(int);
+        auto fnSelect = (DzGetUnitIdx_t)((BYTE*)hPlugin + 0xD9330); // DzGetLocalSelectUnit
+        hUnit = fnSelect(0);
+        if (hUnit) return hUnit;
+
+        auto fnMouse = (DzGetUnit_t)((BYTE*)hPlugin + 0xD46E0); // DzGetUnitUnderMouse
+        hUnit = fnMouse();
+        if (hUnit) return hUnit;
+    }
+    return 0;
+}
+
+DWORD GetTargetUnitPtr() {
+    HMODULE hPlugin = GetModuleHandleA("War3Plugin.dll");
+    if (hPlugin && g_gameBase) {
+        typedef DWORD(__cdecl *DzGetUnit_t)();
+        auto fnLeader = (DzGetUnit_t)((BYTE*)hPlugin + 0xD9840);
+        DWORD hUnit = fnLeader();
+        if (!hUnit) {
+            auto fnSelect = (DWORD(__cdecl*)(int))((BYTE*)hPlugin + 0xD9330);
+            hUnit = fnSelect(0);
+        }
+        if (!hUnit) {
+            auto fnMouse = (DzGetUnit_t)((BYTE*)hPlugin + 0xD46E0);
+            hUnit = fnMouse();
+        }
+        if (hUnit) {
+            typedef DWORD(__cdecl *ConvertHandle_t)(DWORD);
+            DWORD pUnit = ((ConvertHandle_t)(g_gameBase + 0x1D1550))(hUnit);
+            if (pUnit) return pUnit;
+        }
+    }
+
+    __try {
+        if (!g_gameBase) return 0;
+        DWORD* pGame = (DWORD*)(g_gameBase + 0xBE4238);
+        if (pGame && *pGame) {
+            DWORD pGameWar3 = *pGame;
+            DWORD playerId = *(DWORD*)(pGameWar3 + 0x28);
+            if (playerId < 16) {
+                DWORD player = *(DWORD*)(pGameWar3 + 0x58 + playerId * 4);
+                if (player) {
+                    DWORD listRoot = *(DWORD*)(player + 0x34);
+                    if (listRoot) {
+                        DWORD listHead = *(DWORD*)(listRoot + 0x1F0);
                         DWORD listLength = *(DWORD*)(listRoot + 0x1F8);
-                        if (listLength > 0) {
+                        if (listHead && listLength > 0) {
                             DWORD firstNode = *(DWORD*)(listHead + 0x00);
                             if (firstNode) {
-                                targetUnit = *(DWORD*)(firstNode + 0x08);
+                                DWORD unit = *(DWORD*)(firstNode + 0x08);
+                                if (unit) return unit;
                             }
                         }
                     }
                 }
             }
         }
-    }
-    
-    // 2. Try unit under mouse cursor (CGameUI + 0x3BC -> +0x244)
-    if (!targetUnit) {
-        DWORD* pUI = (DWORD*)(gameBase + 0xBE6350);
+        DWORD* pUI = (DWORD*)(g_gameBase + 0xBE6350);
         if (pUI && *pUI) {
             DWORD worldFrame = *(DWORD*)(*pUI + 0x3BC);
             if (worldFrame) {
-                targetUnit = *(DWORD*)(worldFrame + 0x244);
+                DWORD unit = *(DWORD*)(worldFrame + 0x244);
+                if (unit) return unit;
             }
         }
-    }
-    return targetUnit;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+    return 0;
 }
 
 // -------------------------------------------------------------------------
@@ -635,55 +707,59 @@ DWORD GetTargetUnit() {
 // -------------------------------------------------------------------------
 
 void Cmd_Kill(const std::string& args) {
-    DWORD targetUnit = GetTargetUnit();
-    if (!targetUnit) {
-        ConsoleLog("[HeroAction] No unit selected or hovered under cursor!\n");
+    DWORD hUnit = GetTargetUnitHandle();
+    if (hUnit && g_gameBase) {
+        typedef void(__cdecl *KillUnit_t)(DWORD);
+        KillUnit_t fnKill = (KillUnit_t)(g_gameBase + 0x1EFCD0);
+        fnKill(hUnit);
+        ConsoleLog("[HeroAction] Instantly killed target unit (via JKillUnit)!\n");
         return;
     }
-    DWORD gameBase = 0x6F000000;
-    DWORD hpIndex = *(DWORD*)(targetUnit + 0xA0);
-    DWORD thisGame = *(DWORD*)(gameBase + 0xBE40A8);
-    if (thisGame) {
-        DWORD gameMemory = *(DWORD*)(thisGame + 0x0C);
-        if (gameMemory) {
-            DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
-            DWORD address1 = *(DWORD*)entryAddress;
-            if (address1) {
-                float* hpValue = (float*)(address1 + 0x78);
-                *hpValue = 0.0f;
-                ConsoleLog("[HeroAction] Instantly killed target unit!\n");
+    DWORD pUnit = GetTargetUnitPtr();
+    if (pUnit && g_gameBase) {
+        DWORD hpIndex = *(DWORD*)(pUnit + 0xA0);
+        DWORD thisGame = *(DWORD*)(g_gameBase + 0xBE40A8);
+        if (thisGame) {
+            DWORD gameMemory = *(DWORD*)(thisGame + 0x0C);
+            if (gameMemory) {
+                DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
+                DWORD address1 = *(DWORD*)entryAddress;
+                if (address1) {
+                    *(float*)(address1 + 0x78) = 0.0f;
+                    ConsoleLog("[HeroAction] Instantly killed target unit (via Memory)!\n");
+                    return;
+                }
             }
         }
     }
+    ConsoleLog("[HeroAction] No unit selected or hovered under cursor!\n");
 }
 
 void Cmd_Heal(const std::string& args) {
-    DWORD targetUnit = GetTargetUnit();
-    if (!targetUnit) {
+    DWORD hUnit = GetTargetUnitHandle();
+    DWORD pUnit = GetTargetUnitPtr();
+    if (!hUnit && !pUnit) {
         ConsoleLog("[HeroAction] No unit selected or hovered under cursor!\n");
         return;
     }
-    DWORD gameBase = 0x6F000000;
-    DWORD hpIndex = *(DWORD*)(targetUnit + 0xA0);
-    DWORD thisGame = *(DWORD*)(gameBase + 0xBE40A8);
-    if (thisGame) {
-        DWORD gameMemory = *(DWORD*)(thisGame + 0x0C);
-        if (gameMemory) {
-            DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
-            DWORD address1 = *(DWORD*)entryAddress;
-            if (address1) {
-                float maxHp = *(float*)(address1 + 0x74);
-                float* hpValue = (float*)(address1 + 0x78);
-                *hpValue = (maxHp > 0.0f) ? maxHp : 999999.0f;
-                ConsoleLog("[HeroAction] Restored target unit HP to maximum!\n");
-            }
+    if (pUnit && g_gameBase) {
+        DWORD fnRestore = g_gameBase + 0x677EF0; // CUnit::RestoreLife
+        __asm {
+            mov ecx, pUnit
+            call fnRestore
         }
     }
+    if (hUnit && g_gameBase) {
+        float maxLife = 999999.0f;
+        typedef void(__cdecl *SetWidgetLife_t)(DWORD, float*);
+        ((SetWidgetLife_t)(g_gameBase + 0x1F7DB0))(hUnit, &maxLife);
+    }
+    ConsoleLog("[HeroAction] Restored target unit HP and Mana to maximum!\n");
 }
 
 void Cmd_Teleport(const std::string& args) {
-    DWORD targetUnit = GetTargetUnit();
-    if (!targetUnit) {
+    DWORD hUnit = GetTargetUnitHandle();
+    if (!hUnit) {
         ConsoleLog("[Teleport] No unit selected or hovered under cursor!\n");
         return;
     }
@@ -692,70 +768,59 @@ void Cmd_Teleport(const std::string& args) {
         ConsoleLog("[Teleport] War3Plugin.dll not ready!\n");
         return;
     }
-    float mouseX = *(float*)((BYTE*)hPlugin + 0x2656D8);
-    float mouseY = *(float*)((BYTE*)hPlugin + 0x2656DC);
-    if (mouseX == 0.0f && mouseY == 0.0f) {
+    typedef DWORD(__cdecl *DzGetFloat_t)();
+    auto fnGetX = (DzGetFloat_t)((BYTE*)hPlugin + 0xCFE80); // DzGetMouseTerrainX
+    auto fnGetY = (DzGetFloat_t)((BYTE*)hPlugin + 0xCFE90); // DzGetMouseTerrainY
+    auto fnSetPos = (void(__cdecl*)(DWORD, float*, float*))((BYTE*)hPlugin + 0xD4490); // DzSetUnitPosition
+
+    DWORD bitsX = fnGetX();
+    DWORD bitsY = fnGetY();
+    float x = *(float*)&bitsX;
+    float y = *(float*)&bitsY;
+
+    if (x == 0.0f && y == 0.0f) {
         ConsoleLog("[Teleport] Mouse cursor is outside map or terrain coords not ready.\n");
         return;
     }
-    DWORD gameBase = 0x6F000000;
-    DWORD fnSetCoord = gameBase + 0x635DE0;
-    __try {
-        __asm {
-            mov ecx, targetUnit
-            push 0
-            push -1
-            push 0
-            push 0
-            push 0
-            push 0
-            push -1
-            push 1
-            push 1
-            lea eax, mouseY
-            push eax
-            lea eax, mouseX
-            push eax
-            call fnSetCoord
-        }
-        char log[128];
-        sprintf_s(log, sizeof(log), "[Teleport] Teleported unit to mouse position: (X: %.1f, Y: %.1f)!\n", mouseX, mouseY);
-        ConsoleLog(log);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        ConsoleLog("[Teleport] Exception caught during CWidget::SetCoord.\n");
-    }
+
+    fnSetPos(hUnit, &x, &y);
+    char log[128];
+    sprintf_s(log, sizeof(log), "[Teleport] Teleported unit to mouse position: (X: %.1f, Y: %.1f)!\n", x, y);
+    ConsoleLog(log);
 }
 
 void Cmd_God(const std::string& args) {
-    DWORD targetUnit = GetTargetUnit();
-    if (!targetUnit) {
+    DWORD hUnit = GetTargetUnitHandle();
+    DWORD pUnit = GetTargetUnitPtr();
+    if (!hUnit && !pUnit) {
         ConsoleLog("[GodMode] No unit selected or hovered under cursor!\n");
         return;
     }
-    DWORD gameBase = 0x6F000000;
-    // 1. Call Game.dll CGameState::SetUnitInvulnerable(BOOL flag, CUnit* unit) @ 0x210CB0
-    DWORD pGameWar3 = *(DWORD*)(gameBase + 0xBE4238);
-    if (pGameWar3) {
-        DWORD gameState = *(DWORD*)(pGameWar3 + 0x1C);
-        if (gameState) {
-            typedef void(__thiscall *SetUnitInvul_t)(DWORD thisPtr, BOOL flag, DWORD unit);
-            SetUnitInvul_t fnSetInvul = (SetUnitInvul_t)(gameBase + 0x210CB0);
-            fnSetInvul(gameState, TRUE, targetUnit);
-        }
+
+    // 1. Official Blizzard SetUnitInvulnerable (+0x1F7690)
+    if (hUnit && g_gameBase) {
+        typedef void(__cdecl *SetUnitInvul_t)(DWORD, BOOL);
+        ((SetUnitInvul_t)(g_gameBase + 0x1F7690))(hUnit, TRUE);
     }
-    // 2. Maximize and lock HP to 999,999,999.0f
-    DWORD hpIndex = *(DWORD*)(targetUnit + 0xA0);
-    DWORD thisGame = *(DWORD*)(gameBase + 0xBE40A8);
-    if (thisGame) {
-        DWORD gameMemory = *(DWORD*)(thisGame + 0x0C);
-        if (gameMemory) {
-            DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
-            DWORD address1 = *(DWORD*)entryAddress;
-            if (address1) {
-                float* maxHp = (float*)(address1 + 0x74);
-                float* hpValue = (float*)(address1 + 0x78);
-                *maxHp = 999999999.0f;
-                *hpValue = 999999999.0f;
+
+    // 2. Maximize and lock HP
+    if (pUnit && g_gameBase) {
+        DWORD fnRestore = g_gameBase + 0x677EF0;
+        __asm {
+            mov ecx, pUnit
+            call fnRestore
+        }
+        DWORD hpIndex = *(DWORD*)(pUnit + 0xA0);
+        DWORD thisGame = *(DWORD*)(g_gameBase + 0xBE40A8);
+        if (thisGame) {
+            DWORD gameMemory = *(DWORD*)(thisGame + 0x0C);
+            if (gameMemory) {
+                DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
+                DWORD address1 = *(DWORD*)entryAddress;
+                if (address1) {
+                    *(float*)(address1 + 0x74) = 999999999.0f;
+                    *(float*)(address1 + 0x78) = 999999999.0f;
+                }
             }
         }
     }
@@ -763,145 +828,168 @@ void Cmd_God(const std::string& args) {
 }
 
 void Cmd_AddSP(const std::string& args) {
-    DWORD targetUnit = GetTargetUnit();
-    if (!targetUnit) {
+    DWORD pUnit = GetTargetUnitPtr();
+    if (!pUnit) {
         ConsoleLog("[HeroAction] No unit selected or hovered under cursor!\n");
         return;
     }
-    DWORD heroAbility = *(DWORD*)(targetUnit + 0x1F0);
-    if (!heroAbility) {
-        ConsoleLog("[HeroAction] Target unit is not a Hero (no CAbilityHero at +0x1F0).\n");
-        return;
+    __try {
+        DWORD heroAbility = *(DWORD*)(pUnit + 0x1F0);
+        if (!heroAbility) {
+            ConsoleLog("[HeroAction] Target unit is not a Hero (no CAbilityHero at +0x1F0).\n");
+            return;
+        }
+        int amount = atoi(args.c_str());
+        if (amount <= 0) amount = 10;
+        int* pSp = (int*)(heroAbility + 0x90);
+        *pSp += amount;
+        char log[128];
+        sprintf_s(log, sizeof(log), "[HeroAction] Added %d Skill Points! (Total: %d)\n", amount, *pSp);
+        ConsoleLog(log);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        ConsoleLog("[HeroAction] Exception while modifying Skill Points.\n");
     }
-    int amount = atoi(args.c_str());
-    if (amount <= 0) amount = 10;
-    int* pSp = (int*)(heroAbility + 0x90);
-    *pSp += amount;
-    char log[128];
-    sprintf_s(log, sizeof(log), "[HeroAction] Added %d Skill Points! (Total: %d)\n", amount, *pSp);
-    ConsoleLog(log);
 }
 
 void Cmd_AddStats(const std::string& args) {
-    DWORD targetUnit = GetTargetUnit();
-    if (!targetUnit) {
+    DWORD pUnit = GetTargetUnitPtr();
+    if (!pUnit) {
         ConsoleLog("[HeroAction] No unit selected or hovered under cursor!\n");
         return;
     }
-    DWORD heroAbility = *(DWORD*)(targetUnit + 0x1F0);
-    if (!heroAbility) {
-        ConsoleLog("[HeroAction] Target unit is not a Hero (no CAbilityHero at +0x1F0).\n");
-        return;
+    __try {
+        DWORD heroAbility = *(DWORD*)(pUnit + 0x1F0);
+        if (!heroAbility) {
+            ConsoleLog("[HeroAction] Target unit is not a Hero (no CAbilityHero at +0x1F0).\n");
+            return;
+        }
+        int amount = atoi(args.c_str());
+        if (amount <= 0) amount = 500;
+        int* pStr = (int*)(heroAbility + 0x94);
+        int* pAgi = (int*)(heroAbility + 0xA8);
+        *pStr += amount;
+        *pAgi += amount;
+        char log[128];
+        sprintf_s(log, sizeof(log), "[HeroAction] Boosted Stats +%d! (STR: %d, AGI: %d)\n", amount, *pStr, *pAgi);
+        ConsoleLog(log);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        ConsoleLog("[HeroAction] Exception while boosting hero stats.\n");
     }
-    int amount = atoi(args.c_str());
-    if (amount <= 0) amount = 500;
-    int* pStr = (int*)(heroAbility + 0x94);
-    int* pAgi = (int*)(heroAbility + 0xA8);
-    *pStr += amount;
-    *pAgi += amount;
-    char log[128];
-    sprintf_s(log, sizeof(log), "[HeroAction] Boosted Stats +%d! (STR: %d, AGI: %d)\n", amount, *pStr, *pAgi);
-    ConsoleLog(log);
 }
 
 void Cmd_AddXP(const std::string& args) {
-    DWORD targetUnit = GetTargetUnit();
-    if (!targetUnit) {
+    DWORD pUnit = GetTargetUnitPtr();
+    if (!pUnit) {
         ConsoleLog("[HeroAction] No unit selected or hovered under cursor!\n");
         return;
     }
-    DWORD heroAbility = *(DWORD*)(targetUnit + 0x1F0);
-    if (!heroAbility) {
-        ConsoleLog("[HeroAction] Target unit is not a Hero (no CAbilityHero at +0x1F0).\n");
-        return;
+    __try {
+        DWORD heroAbility = *(DWORD*)(pUnit + 0x1F0);
+        if (!heroAbility) {
+            ConsoleLog("[HeroAction] Target unit is not a Hero (no CAbilityHero at +0x1F0).\n");
+            return;
+        }
+        int amount = atoi(args.c_str());
+        if (amount <= 0) amount = 10000;
+        int* pXp = (int*)(heroAbility + 0x8C);
+        *pXp += amount;
+        char log[128];
+        sprintf_s(log, sizeof(log), "[HeroAction] Added %d XP! (Total: %d)\n", amount, *pXp);
+        ConsoleLog(log);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        ConsoleLog("[HeroAction] Exception while modifying hero XP.\n");
     }
-    int amount = atoi(args.c_str());
-    if (amount <= 0) amount = 10000;
-    int* pXp = (int*)(heroAbility + 0x8C);
-    *pXp += amount;
-    char log[128];
-    sprintf_s(log, sizeof(log), "[HeroAction] Added %d XP! (Total: %d)\n", amount, *pXp);
-    ConsoleLog(log);
 }
 
 void Cmd_VIP(const std::string& args) {
     g_PlatformVIP = atoi(args.c_str());
+    SaveConfigValue(L"PlatformVIP", g_PlatformVIP);
     char log[128];
-    sprintf_s(log, sizeof(log), "[Control] PlatformVIP changed to: %d\n", g_PlatformVIP);
+    sprintf_s(log, sizeof(log), "[Control] PlatformVIP changed to: %d (Saved to INI)\n", g_PlatformVIP);
     ConsoleLog(log);
 }
 
 void Cmd_Mall(const std::string& args) {
     g_MallMode = atoi(args.c_str());
+    SaveConfigValue(L"MallMode", g_MallMode);
     char log[128];
-    sprintf_s(log, sizeof(log), "[Control] MallMode changed to: %d\n", g_MallMode);
+    sprintf_s(log, sizeof(log), "[Control] MallMode changed to: %d (Saved to INI)\n", g_MallMode);
     ConsoleLog(log);
 }
 
 void Cmd_Percent(const std::string& args) {
     g_MallPercent = atoi(args.c_str());
+    SaveConfigValue(L"MallPercent", g_MallPercent);
     char log[128];
-    sprintf_s(log, sizeof(log), "[Control] MallPercent changed to: %d%%\n", g_MallPercent);
+    sprintf_s(log, sizeof(log), "[Control] MallPercent changed to: %d%% (Saved to INI)\n", g_MallPercent);
     ConsoleLog(log);
 }
 
 void Cmd_Level(const std::string& args) {
     g_MapLevel = atoi(args.c_str());
+    SaveConfigValue(L"MapLevel", g_MapLevel);
     char log[128];
-    sprintf_s(log, sizeof(log), "[Control] MapLevel changed to: %d\n", g_MapLevel);
+    sprintf_s(log, sizeof(log), "[Control] MapLevel changed to: %d (Saved to INI)\n", g_MapLevel);
     ConsoleLog(log);
 }
 
 void Cmd_AntiOver(const std::string& args) {
     g_PreventGameOver = atoi(args.c_str());
+    SaveConfigValue(L"PreventGameOver", g_PreventGameOver);
     char log[128];
-    sprintf_s(log, sizeof(log), "[Control] PreventGameOver changed to: %d\n", g_PreventGameOver);
+    sprintf_s(log, sizeof(log), "[Control] PreventGameOver changed to: %d (Saved to INI)\n", g_PreventGameOver);
     ConsoleLog(log);
 }
 
 void Cmd_Gold(const std::string& args) {
     int amount = atoi(args.c_str());
     if (amount <= 0) amount = 100000;
-    DWORD gameBase = 0x6F000000;
-    DWORD* pGame = (DWORD*)(gameBase + 0xBE4238);
-    if (pGame && *pGame) {
-        DWORD pGameWar3 = *pGame;
-        DWORD playerId = *(DWORD*)(pGameWar3 + 0x28);
-        if (playerId < 16) {
-            DWORD player = *(DWORD*)(pGameWar3 + 0x58 + playerId * 4);
-            if (player) {
-                DWORD* pGold = (DWORD*)(player + 0x78);
-                *pGold += amount;
-                char log[128];
-                sprintf_s(log, sizeof(log), "[Resources] Added %d Gold! (Current: %u)\n", amount, *pGold);
-                ConsoleLog(log);
-                return;
+    __try {
+        if (g_gameBase) {
+            DWORD* pGame = (DWORD*)(g_gameBase + 0xBE4238);
+            if (pGame && *pGame) {
+                DWORD pGameWar3 = *pGame;
+                DWORD playerId = *(DWORD*)(pGameWar3 + 0x28);
+                if (playerId < 16) {
+                    DWORD player = *(DWORD*)(pGameWar3 + 0x58 + playerId * 4);
+                    if (player) {
+                        DWORD* pGold = (DWORD*)(player + 0x78);
+                        *pGold += amount;
+                        char log[128];
+                        sprintf_s(log, sizeof(log), "[Resources] Added %d Gold! (Current: %u)\n", amount, *pGold);
+                        ConsoleLog(log);
+                        return;
+                    }
+                }
             }
         }
-    }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
     ConsoleLog("[Resources] Error: Player object not found.\n");
 }
 
 void Cmd_Lumber(const std::string& args) {
     int amount = atoi(args.c_str());
     if (amount <= 0) amount = 100000;
-    DWORD gameBase = 0x6F000000;
-    DWORD* pGame = (DWORD*)(gameBase + 0xBE4238);
-    if (pGame && *pGame) {
-        DWORD pGameWar3 = *pGame;
-        DWORD playerId = *(DWORD*)(pGameWar3 + 0x28);
-        if (playerId < 16) {
-            DWORD player = *(DWORD*)(pGameWar3 + 0x58 + playerId * 4);
-            if (player) {
-                DWORD* pLumber = (DWORD*)(player + 0x7C);
-                *pLumber += amount;
-                char log[128];
-                sprintf_s(log, sizeof(log), "[Resources] Added %d Lumber! (Current: %u)\n", amount, *pLumber);
-                ConsoleLog(log);
-                return;
+    __try {
+        if (g_gameBase) {
+            DWORD* pGame = (DWORD*)(g_gameBase + 0xBE4238);
+            if (pGame && *pGame) {
+                DWORD pGameWar3 = *pGame;
+                DWORD playerId = *(DWORD*)(pGameWar3 + 0x28);
+                if (playerId < 16) {
+                    DWORD player = *(DWORD*)(pGameWar3 + 0x58 + playerId * 4);
+                    if (player) {
+                        DWORD* pLumber = (DWORD*)(player + 0x7C);
+                        *pLumber += amount;
+                        char log[128];
+                        sprintf_s(log, sizeof(log), "[Resources] Added %d Lumber! (Current: %u)\n", amount, *pLumber);
+                        ConsoleLog(log);
+                        return;
+                    }
+                }
             }
         }
-    }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
     ConsoleLog("[Resources] Error: Player object not found.\n");
 }
 
@@ -925,16 +1013,20 @@ void Cmd_Fog(const std::string& args) {
 void Cmd_Speed(const std::string& args) {
     float speed = (float)atof(args.c_str());
     if (speed <= 0.0f) speed = 1.0f;
-    for (int i = 0; i < g_nativeCount; ++i) {
-        if (strcmp(g_natives[i].name, "SetGameSpeed") == 0) {
-            typedef void(__cdecl *SetGameSpeed_t)(int);
-            int val = (speed >= 2.0f) ? 4 : 3;
-            ((SetGameSpeed_t)g_natives[i].func_ptr)(val);
-        }
+
+    HMODULE hPlugin = GetModuleHandleA("War3Plugin.dll");
+    if (hPlugin) {
+        typedef void(__cdecl *DzSetSpeed_t)(float*);
+        auto fnDzSetSpeed = (DzSetSpeed_t)((BYTE*)hPlugin + 0xD62D0); // DzSetSpeed
+        float speedVal = speed;
+        fnDzSetSpeed(&speedVal);
+        
+        char log[128];
+        sprintf_s(log, sizeof(log), "[GameSpeed] Game Speed adjusted via DzSetSpeed (Factor: %.1fx)\n", speed);
+        ConsoleLog(log);
+        return;
     }
-    char log[128];
-    sprintf_s(log, sizeof(log), "[GameSpeed] Game Speed adjusted (Factor: %.1fx)\n", speed);
-    ConsoleLog(log);
+    ConsoleLog("[GameSpeed] Error: War3Plugin.dll not found.\n");
 }
 
 void Cmd_Save(const std::string& args) {
@@ -1163,11 +1255,20 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam) {
                 buffer[bytesRead] = '\0';
                 
                 // Forward command to Game Thread Dispatcher
-                if (g_gameHwnd) {
-                    std::string* pCmd = new std::string(buffer);
-                    SendMessageA(g_gameHwnd, WM_APP + 5, 0, (LPARAM)pCmd);
-                } else {
-                    DispatchCommand(buffer);
+                std::stringstream ss(buffer);
+                std::string line;
+                while (std::getline(ss, line)) {
+                    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+                        line.pop_back();
+                    }
+                    if (line.empty()) continue;
+
+                    if (g_gameHwnd) {
+                        std::string* pCmd = new std::string(line);
+                        SendMessageA(g_gameHwnd, WM_APP + 5, 0, (LPARAM)pCmd);
+                    } else {
+                        DispatchCommand(line);
+                    }
                 }
             }
             g_activePipe = INVALID_HANDLE_VALUE;
@@ -1232,8 +1333,11 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     GetWindowThreadProcessId(hwnd, &pid);
     if (pid == data->processId) {
         char className[256];
+        char title[256];
         GetClassNameA(hwnd, className, sizeof(className));
-        if (strcmp(className, "Warcraft III") == 0 || strcmp(className, "OsWindow") == 0 || strstr(className, "Warcraft") != NULL) {
+        GetWindowTextA(hwnd, title, sizeof(title));
+        if (strcmp(className, "Warcraft III") == 0 || strcmp(className, "OsWindow") == 0 || 
+            strstr(className, "Warcraft") != NULL || strstr(title, "Warcraft") != NULL) {
             data->hWnd = hwnd;
             return FALSE;
         }
@@ -1260,6 +1364,7 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
         Sleep(100);
         hGame = GetModuleHandleA("Game.dll");
     }
+    g_gameBase = (DWORD)hGame;
 
     OriginalRegisterNative = (RegisterNative_t)((DWORD)hGame + REGISTER_NATIVE_RVA);
     InstallHook();
@@ -1305,8 +1410,8 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
             InstallSpoofHook("DzAPI_Map_GetPlatformVIP", (void*)Spoof_PlatformVIP);
             InstallSpoofHook("DzAPI_Map_IsRedVIP", (void*)Spoof_True);
             InstallSpoofHook("DzAPI_Map_IsBlueVIP", (void*)Spoof_True);
-            InstallSpoofHook("DzAPI_Map_GetServerArchiveEquip", (void*)Spoof_True);
-            InstallSpoofHook("DzAPI_Map_GetServerArchiveDrop", (void*)Spoof_True);
+            // Note: DzAPI_Map_GetServerArchiveEquip and DzAPI_Map_GetServerArchiveDrop
+            // are platform save archives, NOT mall items. Hooking them breaks save loading.
         }
         InstallSpoofHook("DzAPI_Map_GetMapLevel", (void*)Spoof_LevelDynamic);
         InstallSpoofHook("DzAPI_Map_GetLadderLevel", (void*)Spoof_LevelDynamic);
@@ -1326,13 +1431,20 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
     InitCommandRegistry();
 
     EnumData edata = { GetCurrentProcessId(), NULL };
-    EnumWindows(EnumWindowsProc, (LPARAM)&edata);
+    for (int retry = 0; retry < 40 && !edata.hWnd; ++retry) {
+        EnumWindows(EnumWindowsProc, (LPARAM)&edata);
+        if (!edata.hWnd) {
+            Sleep(500);
+        }
+    }
     if (edata.hWnd) {
         g_gameHwnd = edata.hWnd;
         OriginalWndProc = (WNDPROC)SetWindowLongA(edata.hWnd, GWL_WNDPROC, (LONG)(LONG_PTR)HookedWndProc);
-        ConsoleLog("[JassHook] WndProc hooked successfully. E2E system ready!\n");
+        char log[256];
+        sprintf_s(log, sizeof(log), "[JassHook] Game window found (0x%p) and WndProc hooked successfully. E2E system ready!\n", g_gameHwnd);
+        ConsoleLog(log);
     } else {
-        ConsoleLog("[JassHook] Error: Could not find game window to hook WndProc.\n");
+        ConsoleLog("[JassHook] Warning: Could not find game window to hook WndProc. Commands will run in pipe context.\n");
     }
 
     CreateThread(NULL, 0, PipeServerThread, NULL, 0, NULL);

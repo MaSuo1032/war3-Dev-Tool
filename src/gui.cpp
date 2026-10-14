@@ -357,6 +357,20 @@ void DisconnectPipe() {
     LeaveCriticalSection(&g_pipeCs);
 }
 
+void SaveConfigValue(const wchar_t* key, int value) {
+    std::string dir = GetExeDir();
+    std::wstring iniPath = Utf8ToWide(dir) + L"JassHookConfig.ini";
+    wchar_t valBuf[32];
+    swprintf_s(valBuf, 32, L"%d", value);
+    WritePrivateProfileStringW(L"Spoof", key, valBuf, iniPath.c_str());
+}
+
+int LoadConfigValue(const wchar_t* key, int defaultVal) {
+    std::string dir = GetExeDir();
+    std::wstring iniPath = Utf8ToWide(dir) + L"JassHookConfig.ini";
+    return GetPrivateProfileIntW(L"Spoof", key, defaultVal, iniPath.c_str());
+}
+
 bool SendPipeCommand(const std::string& cmd) {
     if (!ConnectPipe()) {
         return false;
@@ -366,8 +380,12 @@ bool SendPipeCommand(const std::string& cmd) {
         LeaveCriticalSection(&g_pipeCs);
         return false;
     }
+    std::string formattedCmd = cmd;
+    if (formattedCmd.empty() || formattedCmd.back() != '\n') {
+        formattedCmd += "\n";
+    }
     DWORD bw;
-    BOOL ok = WriteFile(g_hPipe, cmd.c_str(), (DWORD)cmd.length(), &bw, NULL);
+    BOOL ok = WriteFile(g_hPipe, formattedCmd.c_str(), (DWORD)formattedCmd.length(), &bw, NULL);
     if (!ok) {
         CloseHandle(g_hPipe);
         g_hPipe = INVALID_HANDLE_VALUE;
@@ -785,38 +803,43 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             break;
 
         case IDC_BTN_MALL_ALL:
+            SaveConfigValue(L"MallMode", 2);
             if (SendPipeCommand("MALL:2")) {
-                AppendLog(L"[商城] 已切換為模式 2: 全開模式 (所有非黑名單道具一律解鎖)");
+                AppendLog(L"[商城] 已切換為模式 2: 全開模式 (所有非黑名單道具一律解鎖，已寫入 INI)");
             }
             break;
 
         case IDC_BTN_MALL_WHITE:
+            SaveConfigValue(L"MallMode", 1);
             if (SendPipeCommand("MALL:1")) {
-                AppendLog(L"[商城] 已切換為模式 1: 白名單模式 (僅解鎖 mall_spoof.txt 中的道具)");
+                AppendLog(L"[商城] 已切換為模式 1: 白名單模式 (僅解鎖 mall_spoof.txt 中的道具，已寫入 INI)");
             }
             break;
 
         case IDC_BTN_MALL_OFF:
+            SaveConfigValue(L"MallMode", 0);
             if (SendPipeCommand("MALL:0")) {
-                AppendLog(L"[商城] 已切換為模式 0: 關閉偽造 (恢復遊戲原始狀態)");
+                AppendLog(L"[商城] 已切換為模式 0: 關閉偽造 (恢復遊戲原始狀態，已寫入 INI)");
             }
             break;
 
         case IDC_BTN_VIP_ALL:
+            SaveConfigValue(L"PlatformVIP", 2);
             if (SendPipeCommand("VIP:2")) {
-                AppendLog(L"[VIP] 已啟用平台至尊VIP (VIP:2，特權/光環/翅膀/存檔全開)");
+                AppendLog(L"[VIP] 已啟用平台至尊VIP (VIP:2，特權/光環/翅膀/存檔全開，已寫入 INI)");
             }
             break;
 
         case IDC_BTN_ANTIOVER: {
             g_antiOverEnabled = !g_antiOverEnabled;
+            SaveConfigValue(L"PreventGameOver", g_antiOverEnabled ? 1 : 0);
             std::string payload = g_antiOverEnabled ? "ANTIOVER:1" : "ANTIOVER:0";
             if (SendPipeCommand(payload)) {
                 if (g_antiOverEnabled) {
-                    AppendLog(L"[防護] 已開啟防失敗/防結算保護 (ANTIOVER:1)");
+                    AppendLog(L"[防護] 已開啟防失敗/防結算保護 (ANTIOVER:1，已寫入 INI)");
                     SetWindowTextW(g_hBtnAntiOver, L"🛡️ 防失敗保護 (目前: 開)");
                 } else {
-                    AppendLog(L"[防護] 已關閉防失敗/防結算保護 (ANTIOVER:0)");
+                    AppendLog(L"[防護] 已關閉防失敗/防結算保護 (ANTIOVER:0，已寫入 INI)");
                     SetWindowTextW(g_hBtnAntiOver, L"🛡️ 防失敗保護 (目前: 關)");
                 }
             }
@@ -962,11 +985,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         case IDC_BTN_SET_LEVEL: {
             char lvlBuf[32];
             GetWindowTextA(g_hEditLevel, lvlBuf, sizeof(lvlBuf));
-            if (strlen(lvlBuf) > 0) {
-                std::string payload = std::string("LEVEL:") + lvlBuf;
-                if (SendPipeCommand(payload)) {
-                    AppendLog(L"[等級] 已設定偽造地圖等級為: " + Utf8ToWide(lvlBuf));
-                }
+            int lvl = atoi(lvlBuf);
+            if (lvl <= 0) lvl = 1;
+            SaveConfigValue(L"MapLevel", lvl);
+            std::string payload = std::string("LEVEL:") + std::to_string(lvl);
+            if (SendPipeCommand(payload)) {
+                AppendLog(L"[等級] 已設定偽造地圖等級為: " + std::to_wstring(lvl) + L" (已寫入 INI)");
             }
             break;
         }
@@ -974,12 +998,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         case IDC_BTN_SET_PERCENT: {
             char pctBuf[32];
             GetWindowTextA(g_hEditPercent, pctBuf, sizeof(pctBuf));
-            if (strlen(pctBuf) > 0) {
-                std::string payload = std::string("PERCENT:") + pctBuf;
-                SendPipeCommand(payload);
-                SendPipeCommand("MALL:3");
-                AppendLog(L"[商城] 已啟用模式 3 (隨機百分比)，機率設為: " + Utf8ToWide(pctBuf) + L"%");
-            }
+            int pct = atoi(pctBuf);
+            if (pct < 1) pct = 1;
+            if (pct > 100) pct = 100;
+            SaveConfigValue(L"MallPercent", pct);
+            SaveConfigValue(L"MallMode", 3);
+            std::string payload = std::string("PERCENT:") + std::to_string(pct);
+            SendPipeCommand(payload);
+            SendPipeCommand("MALL:3");
+            AppendLog(L"[商城] 已啟用模式 3 (隨機百分比)，機率設為: " + std::to_wstring(pct) + L"% (已寫入 INI)");
             break;
         }
 
@@ -1234,12 +1261,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     CreateTabCtrl(2, L"BUTTON", L"❌ 關閉商城 (!mall 0)", BS_PUSHBUTTON, 555, 185, 150, 32, IDC_BTN_MALL_OFF);
 
     g_hBtnAntiOver = CreateTabCtrl(2, L"BUTTON", L"🛡️ 防失敗保護 (目前: 開)", BS_PUSHBUTTON, 45, 228, 170, 30, IDC_BTN_ANTIOVER);
+    int savedLevel = LoadConfigValue(L"MapLevel", 99);
+    int savedPercent = LoadConfigValue(L"MallPercent", 30);
+    int savedMallMode = LoadConfigValue(L"MallMode", 2);
+
     CreateTabCtrl(2, L"STATIC", L"地圖等級:", SS_LEFT, 230, 233, 65, 20, IDC_LBL_LEVEL);
-    g_hEditLevel = CreateTabCtrl(2, L"EDIT", L"99", WS_BORDER | ES_NUMBER, 298, 230, 55, 24, IDC_EDIT_LEVEL);
+    g_hEditLevel = CreateTabCtrl(2, L"EDIT", std::to_wstring(savedLevel).c_str(), WS_BORDER | ES_NUMBER, 298, 230, 55, 24, IDC_EDIT_LEVEL);
     CreateTabCtrl(2, L"BUTTON", L"設定等級", BS_PUSHBUTTON, 360, 228, 85, 28, IDC_BTN_SET_LEVEL);
 
     CreateTabCtrl(2, L"STATIC", L"商城隨機百分比 (%):", SS_LEFT, 460, 233, 130, 20, IDC_LBL_PERCENT);
-    g_hEditPercent = CreateTabCtrl(2, L"EDIT", L"30", WS_BORDER | ES_NUMBER, 595, 230, 50, 24, IDC_EDIT_PERCENT);
+    g_hEditPercent = CreateTabCtrl(2, L"EDIT", std::to_wstring(savedPercent).c_str(), WS_BORDER | ES_NUMBER, 595, 230, 50, 24, IDC_EDIT_PERCENT);
     CreateTabCtrl(2, L"BUTTON", L"設定百分比 (模式3)", BS_PUSHBUTTON, 652, 228, 125, 28, IDC_BTN_SET_PERCENT);
     CreateTabCtrl(2, L"STATIC", L"說明: 至尊VIP解鎖翅膀光環特權，防失敗保護攔截地圖非正常結算，商城支援全開或白名單過濾陷阱道具。", SS_LEFT, 45, 268, 725, 20, 0);
 
@@ -1300,6 +1331,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     AppendLog(L"=== Warcraft III JassHook 開發者輔助控制台 v2.0 (Tab 增強版) 啟動完成 ===");
     AppendLog(L"[*] 系統已具備 SeDebugPrivilege 管理員除錯權限。");
+    AppendLog(L"[*] 已載入 JassHookConfig.ini: 商城模式=" + std::to_wstring(savedMallMode) + L", 隨機百分比=" + std::to_wstring(savedPercent) + L"%, 地圖等級=" + std::to_wstring(savedLevel));
     AppendLog(L"[*] 已升級為 Tab 分頁架構: 【英雄與動作】、【戰鬥與地圖】、【平台與存檔】、【即時監控】。");
     AppendLog(L"[*] 記憶體瞬移與無敵已就緒: 瞬移至滑鼠 (Ctrl+M)、無敵神模式 (Ctrl+G)、滿血 (Ctrl+H)、秒殺 (Ctrl+K)。");
     AppendLog(L"[*] 戰鬥與地圖輔助已啟用: 遊戲倍速齒輪 (1x~10x)、全圖開霧、資源一鍵修改 (金幣/木材)。");
