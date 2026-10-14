@@ -8,26 +8,18 @@
 
 void PrintMenu() {
     std::cout << "========================================================\n";
-    std::cout << " Warcraft III JASS & Native 開發者控制台 v2.0\n";
+    std::cout << " Warcraft III JASS & Native 開發者控制台 v2.1\n";
     std::cout << "========================================================\n";
     std::cout << " [存檔相關指令]\n";
     std::cout << "  !panel            : 從 local_save.txt 產生 save_panel.txt 並用記事本開啟修改\n";
     std::cout << "  !saveall          : 將 save_panel.txt 內的修改批量寫入回遊戲伺服器\n";
-    std::cout << "  !save <P> <K> <V> : 手動發送單筆存檔 (例: !save 1048584 Isuipian1 999)\n\n";
-    std::cout << " [遊戲與商城動態控制]\n";
+    std::cout << "  !save <P> <K> <V> : 手動發送單筆存檔 (例: !save 1048602 IWJCS 999)\n\n";
+    std::cout << " [商城模式與黑名單控制]\n";
     std::cout << "  !mall <0|1|2|3>   : 切換商城模式 (0=原廠關閉, 1=白名單, 2=全開, 3=百分比)\n";
     std::cout << "  !percent <1~100>  : 設定商城隨機開啟百分比 (僅模式3生效)\n";
-    std::cout << "  !level <等級>     : 動態偽造地圖等級 (例: !level 99)\n";
-    std::cout << "  !vip <0|1|2>      : 動態切換平台 VIP 等級 (2=至尊VIP，解鎖翅膀光環特權)\n";
-    std::cout << "  !antiover <0|1>   : 切換防作弊遊戲失敗/結算阻擋保護 (1=開啟, 0=關閉)\n\n";
-    std::cout << " [英雄與單位增強 (瞬移 / 無敵 / 屬性)]\n";
-    std::cout << "  !tp / !blink      : 瞬移選取/滑鼠懸停單位至滑鼠地形座標 (遊戲內熱鍵: Ctrl+M)\n";
-    std::cout << "  !god / !invul     : 將選取單位設為官方無敵 (God Mode，生命值鎖定10億) (遊戲內熱鍵: Ctrl+G)\n";
-    std::cout << "  !heal             : 補滿當前選取/滑鼠懸停單位的生命值 (遊戲內熱鍵: Ctrl+H)\n";
-    std::cout << "  !kill             : 秒殺當前選取/滑鼠懸停的單位 (HP歸零) (遊戲內熱鍵: Ctrl+K)\n";
-    std::cout << "  !sp <數量>        : 為目標英雄增加技能點 (例: !sp 50)\n";
-    std::cout << "  !stats <數量>     : 為目標英雄增加力量與敏捷 (例: !stats 500)\n";
-    std::cout << "  !xp <數量>        : 為目標英雄增加經驗值 (例: !xp 10000)\n\n";
+    std::cout << "  !reload           : 重新載入 mall_spoof.txt 與 mall_blacklist.txt\n\n";
+    std::cout << " [單位操作]\n";
+    std::cout << "  !kill             : 秒殺當前選取的單位 (HP歸零) (遊戲內熱鍵: Ctrl+K)\n\n";
     std::cout << " [動態 Native 呼叫]\n";
     std::cout << "  !<Native名稱> <參數1> <參數2> ... (例: !SuicideUnit 123 456)\n";
     std::cout << "  !help             : 重新顯示此選單\n";
@@ -96,34 +88,13 @@ int main() {
         if (input == "exit") break;
         if (input.empty()) continue;
         
-        while (!input.empty() && (input.back() == '\r' || input.back() == '\n')) {
+        while (!input.empty() && (input.back() == '\r' || input.back() == '\n' || input.back() == ' ')) {
             input.pop_back();
         }
         if (input.empty()) continue;
         
         if (input == "!kill" || input == "!killselected") {
             input = "KILL";
-        }
-        else if (input == "!heal") {
-            input = "HEAL";
-        }
-        else if (input == "!tp" || input == "!blink" || input == "!teleport") {
-            input = "TELEPORT";
-        }
-        else if (input == "!god" || input == "!invul" || input == "!wudi") {
-            input = "GOD";
-        }
-        else if (input.rfind("!sp ", 0) == 0) {
-            input = "ADD_SP:" + input.substr(4);
-        }
-        else if (input.rfind("!stats ", 0) == 0) {
-            input = "ADD_STATS:" + input.substr(7);
-        }
-        else if (input.rfind("!xp ", 0) == 0) {
-            input = "ADD_XP:" + input.substr(4);
-        }
-        else if (input.rfind("!vip ", 0) == 0) {
-            input = "VIP:" + input.substr(5);
         }
         else if (input == "!help") {
             PrintMenu();
@@ -135,11 +106,8 @@ int main() {
         else if (input.rfind("!percent ", 0) == 0) {
             input = "PERCENT:" + input.substr(9);
         }
-        else if (input.rfind("!level ", 0) == 0) {
-            input = "LEVEL:" + input.substr(7);
-        }
-        else if (input.rfind("!antiover ", 0) == 0) {
-            input = "ANTIOVER:" + input.substr(10);
+        else if (input == "!reload") {
+            input = "RELOAD_LISTS";
         }
         else if (input == "!panel") {
             std::ifstream infile("local_save.txt");
@@ -179,15 +147,29 @@ int main() {
                         }
                     }
                 }
+                else if (line.find("SAVED:") != std::string::npos) {
+                    size_t pPos = line.find("Player ");
+                    size_t lPos = line.find(" SAVED: ");
+                    if (pPos != std::string::npos && lPos != std::string::npos) {
+                        std::string player = line.substr(pPos + 7, lPos - (pPos + 7));
+                        size_t eqPos = line.find(" = ", lPos);
+                        if (eqPos != std::string::npos) {
+                            std::string key = line.substr(lPos + 8, eqPos - (lPos + 8));
+                            std::string val = line.substr(eqPos + 3);
+                            uniqueKeys[{player, key}] = val;
+                        }
+                    }
+                }
             }
             infile.close();
 
             std::ofstream outfile("save_panel.txt");
             outfile << "# ==========================================\n";
-            outfile << "# [外掛存檔修改面板]\n";
+            outfile << "# [War3 RPG 存檔修改面板 - Save Panel]\n";
+            outfile << "# 格式: 玩家ID:存檔變數Key=目標數值\n";
             outfile << "# 等號右邊是你從伺服器真實載入的原始數值\n";
             outfile << "# 請在這裡直接修改數值，例如把 (null/empty) 改成 1 或 <StringID: 419>\n";
-            outfile << "# 修改完畢後儲存，並在控制台輸入 !saveall 來上傳至地圖\n";
+            outfile << "# 修改完畢後儲存 (Ctrl+S)，並在控制台輸入 !saveall 來上傳至地圖\n";
             outfile << "# ==========================================\n\n";
             for (auto const& [pk, val] : uniqueKeys) {
                 outfile << pk.first << ":" << pk.second << "=" << val << "\n";
@@ -207,18 +189,20 @@ int main() {
             std::string line;
             int count = 0;
             while (std::getline(pfile, line)) {
-                if (line.empty() || line[0] == '#') continue;
+                if (line.empty() || line[0] == '#' || line[0] == ';') continue;
                 size_t colon = line.find(':');
                 size_t eq = line.find('=');
-                if (colon != std::string::npos && eq != std::string::npos) {
+                if (colon != std::string::npos && eq != std::string::npos && eq > colon) {
                     std::string p = line.substr(0, colon);
                     std::string k = line.substr(colon + 1, eq - colon - 1);
                     std::string v = line.substr(eq + 1);
+                    while (!v.empty() && (v.back() == '\r' || v.back() == ' ')) v.pop_back();
+                    while (!v.empty() && v.front() == ' ') v.erase(v.begin());
                     
-                    std::string payload = "SAVE:" + p + ":" + k + ":" + v;
+                    std::string payload = "SAVE:" + p + ":" + k + ":" + v + "\n";
                     DWORD bw;
                     WriteFile(hPipe, payload.c_str(), (DWORD)payload.length(), &bw, NULL);
-                    std::cout << "[IPC] 已發送: " << payload << "\n";
+                    std::cout << "[IPC] 已發送: " << payload.substr(0, payload.length() - 1) << "\n";
                     count++;
                     Sleep(20);
                 }
@@ -260,8 +244,11 @@ int main() {
             input = formatted;
         }
         
+        std::string payload = input;
+        if (payload.back() != '\n') payload += "\n";
+
         DWORD bytesWritten;
-        bool success = WriteFile(hPipe, input.c_str(), (DWORD)input.length(), &bytesWritten, NULL);
+        bool success = WriteFile(hPipe, payload.c_str(), (DWORD)payload.length(), &bytesWritten, NULL);
         
         if (success) {
             std::cout << "[IPC] 已發送指令: " << input << std::endl;
