@@ -22,6 +22,9 @@
 #define IDC_BTN_EDIT_BLACKLIST    1015
 #define IDC_BTN_EDIT_WHITELIST    1016
 #define IDC_BTN_RELOAD_LISTS      1017
+#define IDC_BTN_MALL_MODE0        1018
+#define IDC_BTN_MALL_MODE1        1019
+#define IDC_BTN_MALL_MODE2        1008
 
 #define IDC_GRP_SAVE              1020
 #define IDC_BTN_PANEL             1021
@@ -47,6 +50,7 @@
 #define IDC_BTN_COPY_LOG          1044
 #define IDC_BTN_OPEN_TRACE        1045
 
+#define IDC_TAB_MAIN              1050
 #define IDC_TAB_MONITOR           1050
 #define IDC_LIST_SAVE_MONITOR     1051
 #define IDC_BTN_COPY_SAVE_ITEM    1052
@@ -107,6 +111,10 @@
 #define IDC_BTN_SET_ITEM_SLOT3    1119
 #define IDC_BTN_SET_ITEM_SLOT4    1120
 #define IDC_BTN_SET_ITEM_SLOT5    1121
+#define IDC_BTN_ADD_UNIT_STR      1122
+#define IDC_BTN_ADD_UNIT_AGI      1123
+#define IDC_BTN_ADD_UNIT_INT      1124
+#define IDC_BTN_ADD_UNIT_EXP      1125
 
 #define IDT_TIMER_STATUS          1
 #define WM_USER_UPDATE_SAVE_LIST  (WM_USER + 101)
