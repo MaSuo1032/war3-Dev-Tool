@@ -36,6 +36,7 @@ WNDPROC OriginalWndProc = NULL;
 int g_MallMode = 2;         // 0=Off, 1=Whitelist, 2=All, 3=Percent
 int g_MallPercent = 80;     // Default 80%
 int g_MapLevel = 50;        // Map Level spoof
+int g_lastPlayerHandle = 0;  // Last detected player handle
 
 void ConsoleLog(const char* msg) {
     OutputDebugStringA(msg);
@@ -309,6 +310,7 @@ void InstallTrampolineHook(const char* nativeName, void* hookFunc, HookData& out
 // Native Monitors & Spoofers
 // ==========================================
 int __cdecl Monitor_SaveServerValue(int player, DWORD key_ptr, DWORD value_ptr) {
+    if (player != 0) g_lastPlayerHandle = player;
     char log[256];
     const char* keyStr = "(null)";
     const char* valStr = "(null)";
@@ -388,6 +390,7 @@ void __cdecl Monitor_Stat_SetStat(int player, DWORD key_ptr, DWORD value_ptr) {
 }
 
 DWORD __cdecl Monitor_GetServerValue(int player, DWORD key_ptr) {
+    if (player != 0) g_lastPlayerHandle = player;
     const char* keyStr = "(null)";
     __try {
         if (key_ptr > 0x10000 && key_ptr < 0x7FFFFFFF) {
@@ -650,6 +653,25 @@ LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
         }
         return 0;
     }
+
+    if (uMsg == WM_APP + 4) {
+        SaveData* sd = (SaveData*)lParam;
+        if (sd) {
+            int targetPlayer = sd->player;
+            if (targetPlayer == 0 && g_lastPlayerHandle != 0) {
+                targetPlayer = g_lastPlayerHandle;
+            }
+            DWORD fakeKey = CreateFakeJassString(sd->key);
+            
+            char logBuf[512];
+            sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Manual GET request -> Player: %d | Key: \"%s\"\n", 
+                      targetPlayer, sd->key);
+            ConsoleLog(logBuf);
+            
+            Monitor_GetServerValue(targetPlayer, fakeKey);
+        }
+        return 0;
+    }
     
     if (uMsg == WM_APP + 1) {
         InvokeData* data = (InvokeData*)lParam;
@@ -724,6 +746,73 @@ void ProcessSingleCommand(const std::string& cmd) {
             char logBuf[256];
             sprintf_s(logBuf, sizeof(logBuf), "[SaveHook] Applied Save via Pipe: Player %d | %s = %s\n", sd.player, sd.key, sd.val);
             ConsoleLog(logBuf);
+        }
+    }
+    else if (cmd.rfind("GET:", 0) == 0 || cmd.rfind("READ:", 0) == 0) {
+        char buf[512];
+        strncpy_s(buf, cmd.c_str(), sizeof(buf));
+        char* ctx = nullptr;
+        strtok_s(buf, ":", &ctx);
+        char* pStr = strtok_s(nullptr, ":", &ctx);
+        char* kStr = strtok_s(nullptr, ":", &ctx);
+        
+        std::string p, k;
+        if (kStr) {
+            p = pStr;
+            k = kStr;
+        } else if (pStr) {
+            k = pStr;
+            p = std::to_string(g_lastPlayerHandle != 0 ? g_lastPlayerHandle : 1048602);
+        }
+
+        if (!k.empty() && g_gameHwnd) {
+            SaveData sd;
+            sd.player = atoi(p.c_str());
+            if (sd.player == 0 && g_lastPlayerHandle != 0) sd.player = g_lastPlayerHandle;
+            strncpy_s(sd.key, k.c_str(), sizeof(sd.key));
+            sd.val[0] = '\0';
+            SendMessageA(g_gameHwnd, WM_APP + 4, 0, (LPARAM)&sd);
+        }
+    }
+    else if (cmd == "READ_ALL" || cmd.rfind("READ_ALL:", 0) == 0) {
+        int targetPlayer = g_lastPlayerHandle != 0 ? g_lastPlayerHandle : 1048602;
+        if (cmd.rfind("READ_ALL:", 0) == 0) {
+            int p = atoi(cmd.substr(9).c_str());
+            if (p != 0) targetPlayer = p;
+        }
+
+        wchar_t keyPath[MAX_PATH];
+        swprintf_s(keyPath, MAX_PATH, L"%s\\map_keys.txt", g_DllDirectory);
+        std::ifstream kfile(keyPath);
+        if (!kfile.is_open()) {
+            kfile.open("map_keys.txt");
+        }
+        if (kfile.is_open()) {
+            std::string line;
+            int count = 0;
+            char startLog[256];
+            sprintf_s(startLog, sizeof(startLog), "[Control] Starting READ_ALL for Player %d...\n", targetPlayer);
+            ConsoleLog(startLog);
+            while (std::getline(kfile, line)) {
+                while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
+                while (!line.empty() && line.front() == ' ') line.erase(line.begin());
+                if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+                if (g_gameHwnd) {
+                    SaveData sd;
+                    sd.player = targetPlayer;
+                    strncpy_s(sd.key, line.c_str(), sizeof(sd.key));
+                    sd.val[0] = '\0';
+                    SendMessageA(g_gameHwnd, WM_APP + 4, 0, (LPARAM)&sd);
+                    count++;
+                    Sleep(15);
+                }
+            }
+            kfile.close();
+            char endLog[256];
+            sprintf_s(endLog, sizeof(endLog), "[Control] READ_ALL completed: queried %d keys from map_keys.txt.\n", count);
+            ConsoleLog(endLog);
+        } else {
+            ConsoleLog("[Control] READ_ALL failed: map_keys.txt not found!\n");
         }
     }
     else if (cmd.rfind("MALL:", 0) == 0) {

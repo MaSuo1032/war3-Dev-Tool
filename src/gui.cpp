@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <shellapi.h>
 #include <string>
 #include <vector>
@@ -14,8 +15,10 @@
 #include "SaveParser.h"
 #include "ProcessInjector.h"
 #include "PipeClient.h"
+#include "MapKeyExtractor.h"
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(linker,"\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -66,6 +69,8 @@ std::map<SaveItemKey, int> g_saveKeyToIndex;
 
 bool g_runLogTailer = true;
 HANDLE g_hLogTailerThread = NULL;
+bool g_isBatchReading = false;
+HANDLE g_hBatchReadThread = NULL;
 
 // Append log with timestamp
 void AppendLog(const std::wstring& msg) {
@@ -322,6 +327,104 @@ void SaveAllFromPanel() {
     pfile.close();
     AppendLog(L"[+] 批量回寫完成！共發送 " + std::to_wstring(count) + L" 筆存檔指令至遊戲。");
     MessageBoxW(g_hWnd, (L"批量回寫完成！共送出 " + std::to_wstring(count) + L" 筆指令。").c_str(), L"成功", MB_ICONINFORMATION);
+}
+
+// Background thread for querying all map keys from server
+DWORD WINAPI BatchReadWorkerThread(LPVOID lpParam) {
+    g_isBatchReading = true;
+    std::string exeDir = GetExeDir();
+    std::string keyPath = exeDir + "map_keys.txt";
+    std::vector<std::string> keys;
+    if (!LoadMapKeysFile(keyPath, keys)) {
+        keyPath = "map_keys.txt";
+        LoadMapKeysFile(keyPath, keys);
+    }
+
+    if (keys.empty()) {
+        AppendLog(L"[-] 找不到 map_keys.txt 或變數清單為空！請先點擊「📂 提取Key」或「📜 編輯變數名單」。");
+        MessageBoxW(g_hWnd, L"找不到 map_keys.txt 或變數清單為空！\n請先確認目錄下有 map_keys.txt，或點擊「📂 提取Key」從地圖自動提取。", L"提示", MB_ICONWARNING);
+        g_isBatchReading = false;
+        return 0;
+    }
+
+    if (!ConnectPipe()) {
+        AppendLog(L"[-] 無法連線至魔獸爭霸 IPC 管道，請先啟動遊戲進入地圖並注入 JassHook.dll！");
+        MessageBoxW(g_hWnd, L"未連線至魔獸爭霸！\n請先進入地圖並確認 JassHook.dll 已注入。", L"錯誤", MB_ICONERROR);
+        g_isBatchReading = false;
+        return 0;
+    }
+
+    std::string defPid = "1048602";
+    if (g_hEditPid) {
+        char pBuf[64];
+        GetWindowTextA(g_hEditPid, pBuf, sizeof(pBuf));
+        if (strlen(pBuf) > 0) defPid = pBuf;
+    }
+
+    AppendLog(L"[*] 開始向伺服器一鍵遍歷讀取存檔 (目標玩家: " + Utf8ToWide(defPid) + L", 共 " + std::to_wstring(keys.size()) + L" 筆變數)...");
+
+    int count = 0;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (!g_isBatchReading) break;
+        const std::string& k = keys[i];
+        std::string cmd = "GET:" + defPid + ":" + k;
+        if (SendPipeCommand(cmd)) {
+            count++;
+        }
+        Sleep(15);
+    }
+
+    AppendLog(L"[+] 遍歷讀取請求發送完畢！共向伺服器查詢 " + std::to_wstring(count) + L" 筆變數，數值將即時顯示於「存檔即時監控」列表中。");
+    MessageBoxW(g_hWnd, (L"遍歷讀取請求發送完成！共向伺服器查詢 " + std::to_wstring(count) + L" 筆存檔變數。\n\n數值將於數秒內陸續在「存檔即時監控」列表中呈現。").c_str(), L"遍歷讀取完成", MB_ICONINFORMATION);
+    g_isBatchReading = false;
+    return 0;
+}
+
+void StartBatchRead() {
+    if (g_isBatchReading) {
+        MessageBoxW(g_hWnd, L"遍歷讀取正在進行中，請稍候...", L"提示", MB_ICONINFORMATION);
+        return;
+    }
+    if (g_hBatchReadThread) {
+        CloseHandle(g_hBatchReadThread);
+        g_hBatchReadThread = NULL;
+    }
+    g_hBatchReadThread = CreateThread(NULL, 0, BatchReadWorkerThread, NULL, 0, NULL);
+}
+
+void ExtractKeysFromDialog() {
+    wchar_t szFile[MAX_PATH] = L"";
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_hWnd;
+    ofn.lpstrFilter = L"魔獸地圖與腳本檔 (*.j;*.w3x;*.txt)\0*.j;*.w3x;*.txt\0所有檔案 (*.*)\0*.*\0";
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = sizeof(szFile) / sizeof(wchar_t);
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    ofn.lpstrTitle = L"請選擇要提取存檔變數的 war3map.j 或地圖腳本";
+
+    if (GetOpenFileNameW(&ofn)) {
+        std::vector<std::string> keys;
+        if (ExtractKeysFromFile(szFile, keys)) {
+            std::string exeDir = GetExeDir();
+            std::string outPath = exeDir + "map_keys.txt";
+            std::ofstream outfile(outPath);
+            outfile << "# ========================================================\n";
+            outfile << "# [War3 RPG 存檔變數清單 - map_keys.txt]\n";
+            outfile << "# 從 " << WideToUtf8(szFile) << " 自動提取\n";
+            outfile << "# ========================================================\n\n";
+            for (const auto& k : keys) {
+                outfile << k << "\n";
+            }
+            outfile.close();
+
+            AppendLog(L"[+] 成功從檔案提取 " + std::to_wstring(keys.size()) + L" 筆存檔變數，已儲存至 map_keys.txt！");
+            MessageBoxW(g_hWnd, (L"成功提取 " + std::to_wstring(keys.size()) + L" 筆存檔變數！\n已更新至 map_keys.txt，現在可點擊「🔍 一鍵遍歷讀取存檔」。").c_str(), L"提取成功", MB_ICONINFORMATION);
+        } else {
+            AppendLog(L"[-] 未能從所選檔案中識別出任何 DzAPI 存檔變數。");
+            MessageBoxW(g_hWnd, L"未能從檔案中識別出存檔變數！\n請確認選取的是包含 JASS 腳本的 war3map.j 或文字檔。", L"提示", MB_ICONWARNING);
+        }
+    }
 }
 
 // Execute Quick Save (Parses all save formats, updates UI fields, and sends via Pipe)
@@ -739,6 +842,15 @@ void ProcessUserCommand(const std::string& cmd) {
     else if (c == "!saveall") {
         SaveAllFromPanel();
     }
+    else if (c == "!readall" || c == "!getall") {
+        StartBatchRead();
+    }
+    else if (c.rfind("!get ", 0) == 0 || c.rfind("!read ", 0) == 0) {
+        std::string k = c.substr(c.find(' ') + 1);
+        TrimSaveString(k);
+        SendPipeCommand("GET:" + defPid + ":" + k);
+        AppendLog(L"[+] 已發送單筆查詢請求 (GET): " + Utf8ToWide(k));
+    }
     else if (c.rfind("!save", 0) == 0 || c.rfind("SAVE:", 0) == 0 ||
              (c.find("Player") != std::string::npos && c.find("Key") != std::string::npos) ||
              c.find('=') != std::string::npos ||
@@ -979,21 +1091,33 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         SendMessage(g_hSliderPercent, TBM_SETPOS, TRUE, (LPARAM)iniPct);
         SetWindowTextW(g_hEditPercent, std::to_wstring(iniPct).c_str());
 
-        // 3. Group 3: 伺服器存檔管理與即時寫入 (Save Panel & Direct Write)
-        HWND hGrp3 = CreateWindowW(L"BUTTON", L"【伺服器存檔管理與即時寫入 (支援直接複製貼上 Save 格式)】", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+        // 3. Group 3: 伺服器存檔管理、即時寫入與遍歷讀取 (Save Management & Batch Query)
+        HWND hGrp3 = CreateWindowW(L"BUTTON", L"【伺服器存檔管理、即時寫入與一鍵遍歷讀取 (Method 1: 全地圖存檔讀取)】", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
             15, 225, 850, 120, hWnd, (HMENU)IDC_GRP_SAVE, NULL, NULL);
         SendMessage(hGrp3, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
-        HWND hBtnPanel = CreateWindowW(L"BUTTON", L"📝 產生並開啟存檔面板 (!panel)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            30, 245, 255, 30, hWnd, (HMENU)IDC_BTN_PANEL, NULL, NULL);
+        HWND hBtnBatchRead = CreateWindowW(L"BUTTON", L"🔍 一鍵遍歷讀取存檔 (!readall)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            30, 245, 220, 30, hWnd, (HMENU)IDC_BTN_BATCH_READ, NULL, NULL);
+        SendMessage(hBtnBatchRead, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
+
+        HWND hBtnPanel = CreateWindowW(L"BUTTON", L"📝 產生並開啟面板", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            255, 245, 160, 30, hWnd, (HMENU)IDC_BTN_PANEL, NULL, NULL);
         SendMessage(hBtnPanel, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
-        HWND hBtnSaveAll = CreateWindowW(L"BUTTON", L"⚡ 批量覆寫所有存檔 (!saveall)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            295, 245, 255, 30, hWnd, (HMENU)IDC_BTN_SAVEALL, NULL, NULL);
+        HWND hBtnSaveAll = CreateWindowW(L"BUTTON", L"⚡ 批量覆寫存檔", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            420, 245, 140, 30, hWnd, (HMENU)IDC_BTN_SAVEALL, NULL, NULL);
         SendMessage(hBtnSaveAll, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
-        HWND hBtnOpenLocal = CreateWindowW(L"BUTTON", L"📂 開啟存檔日誌 (local_save.txt)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            560, 245, 290, 30, hWnd, (HMENU)IDC_BTN_OPEN_LOCALSAVE, NULL, NULL);
+        HWND hBtnEditKeys = CreateWindowW(L"BUTTON", L"📜 編輯變數名單", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            565, 245, 115, 30, hWnd, (HMENU)IDC_BTN_EDIT_MAP_KEYS, NULL, NULL);
+        SendMessage(hBtnEditKeys, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
+        HWND hBtnExtractKeys = CreateWindowW(L"BUTTON", L"📂 提取Key", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            685, 245, 85, 30, hWnd, (HMENU)IDC_BTN_EXTRACT_KEYS, NULL, NULL);
+        SendMessage(hBtnExtractKeys, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
+        HWND hBtnOpenLocal = CreateWindowW(L"BUTTON", L"📄 存檔日誌", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            775, 245, 75, 30, hWnd, (HMENU)IDC_BTN_OPEN_LOCALSAVE, NULL, NULL);
         SendMessage(hBtnOpenLocal, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
         HWND hLblPid = CreateWindowW(L"STATIC", L"玩家ID:", WS_CHILD | WS_VISIBLE | SS_LEFT,
@@ -1021,7 +1145,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             735, 283, 115, 27, hWnd, (HMENU)IDC_BTN_PASTE_SAVE, NULL, NULL);
         SendMessage(hBtnPasteSave, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        HWND hLblHint = CreateWindowW(L"STATIC", L"💡 存檔格式支援: [SaveServerValue] Player: ID | Key: \"Key\" | Value: \"Val\"、ID:Key=Val、Key=Val 或 !save，支援多行批量貼上與 Enter 發送", WS_CHILD | WS_VISIBLE | SS_LEFT,
+        HWND hLblHint = CreateWindowW(L"STATIC", L"💡 存檔功能: 點擊「一鍵遍歷讀取存檔」向伺服器查詢全部變數，支援手動輸入 [SaveServerValue]、ID:Key=Val 或 !save", WS_CHILD | WS_VISIBLE | SS_LEFT,
             30, 316, 820, 18, hWnd, NULL, NULL, NULL);
         SendMessage(hLblHint, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
@@ -1242,12 +1366,31 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             }
             break;
 
+        case IDC_BTN_BATCH_READ:
+            StartBatchRead();
+            break;
+
         case IDC_BTN_PANEL:
             GenerateAndOpenPanel();
             break;
 
         case IDC_BTN_SAVEALL:
             SaveAllFromPanel();
+            break;
+
+        case IDC_BTN_EDIT_MAP_KEYS: {
+            std::string defaultContent = 
+                "# ========================================================\n"
+                "# [War3 RPG 存檔變數清單 - map_keys.txt]\n"
+                "# 每一行為一個存檔變數 Key (例如: ITYMSTGCS, IWJCS, SCDCWCD3)\n"
+                "# 點擊「🔍 一鍵遍歷讀取存檔」時將依序向伺服器查詢數值\n"
+                "# ========================================================\n";
+            OpenTextFile("map_keys.txt", defaultContent);
+            break;
+        }
+
+        case IDC_BTN_EXTRACT_KEYS:
+            ExtractKeysFromDialog();
             break;
 
         case IDC_BTN_OPEN_LOCALSAVE: {
@@ -1384,6 +1527,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             WaitForSingleObject(g_hLogTailerThread, 500);
             CloseHandle(g_hLogTailerThread);
             g_hLogTailerThread = NULL;
+        }
+        if (g_hBatchReadThread) {
+            g_isBatchReading = false;
+            WaitForSingleObject(g_hBatchReadThread, 500);
+            CloseHandle(g_hBatchReadThread);
+            g_hBatchReadThread = NULL;
         }
         DisconnectPipe();
         if (g_hLogBrush) DeleteObject(g_hLogBrush);

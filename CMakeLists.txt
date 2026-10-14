@@ -39,7 +39,7 @@ endif()
 add_executable(War3DevToolUI WIN32
     src/gui.cpp
 )
-target_link_libraries(War3DevToolUI PRIVATE user32 kernel32 gdi32 comctl32 shell32 advapi32)
+target_link_libraries(War3DevToolUI PRIVATE user32 kernel32 gdi32 comctl32 shell32 advapi32 comdlg32)
 if(MSVC)
     set_target_properties(War3DevToolUI PROPERTIES LINK_FLAGS "/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\"")
 endif()
