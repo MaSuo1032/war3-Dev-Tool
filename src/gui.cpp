@@ -55,6 +55,14 @@
 #define IDC_BTN_ADD_XP        1041
 #define IDC_BTN_TELEPORT      1042
 #define IDC_BTN_GOD           1043
+#define IDC_EDIT_CUSTOM_SP    1044
+#define IDC_BTN_SET_CUSTOM_SP 1045
+#define IDC_EDIT_CUSTOM_STATS 1046
+#define IDC_BTN_SET_CUSTOM_STATS 1047
+#define IDC_BTN_ADD_STATS2000 1048
+#define IDC_EDIT_CUSTOM_XP    1049
+#define IDC_BTN_SET_CUSTOM_XP 1050
+#define IDC_BTN_ADD_XP50000   1053
 
 #define IDC_GRP_CMD           1050
 #define IDC_EDIT_CMD          1051
@@ -69,10 +77,26 @@
 #define IDC_BTN_COPY_LOG      1066
 #define IDC_CHK_AUTO_SCROLL   1067
 
+// Tab 1 Combat & Map
+#define IDC_BTN_SPEED_1X      1070
+#define IDC_BTN_SPEED_2X      1071
+#define IDC_BTN_SPEED_5X      1072
+#define IDC_BTN_SPEED_10X     1073
+#define IDC_BTN_FOG_OFF       1074
+#define IDC_BTN_FOG_ON        1075
+#define IDC_EDIT_GOLD         1076
+#define IDC_BTN_SET_GOLD      1077
+#define IDC_BTN_QUICK_GOLD    1078
+#define IDC_EDIT_LUMBER       1079
+#define IDC_BTN_SET_LUMBER    1080
+#define IDC_BTN_QUICK_LUMBER  1081
+
+#define IDC_MAIN_TAB          2000
 #define IDT_TIMER_STATUS      1
 
 // Global GUI Handles & States
 HWND g_hWnd = NULL;
+HWND g_hTab = NULL;
 HWND g_hEditLog = NULL;
 HWND g_hEditCmd = NULL;
 HWND g_hEditVal = NULL;
@@ -80,6 +104,12 @@ HWND g_hEditPid = NULL;
 HWND g_hEditKey = NULL;
 HWND g_hEditLevel = NULL;
 HWND g_hEditPercent = NULL;
+HWND g_hEditCustomSP = NULL;
+HWND g_hEditCustomStats = NULL;
+HWND g_hEditCustomXP = NULL;
+HWND g_hEditGold = NULL;
+HWND g_hEditLumber = NULL;
+
 HWND g_hLblWar3 = NULL;
 HWND g_hLblPipe = NULL;
 HWND g_hChkAutoInject = NULL;
@@ -102,6 +132,24 @@ std::string g_pipeLogBuffer = "";
 DWORD g_lastDetectedPid = 0;
 bool g_isDllInjected = false;
 bool g_antiOverEnabled = true;
+
+// Tab Management
+std::vector<HWND> g_tabPages[4];
+
+void AddTabCtrl(int tabIdx, HWND hCtrl) {
+    if (tabIdx >= 0 && tabIdx < 4 && hCtrl) {
+        g_tabPages[tabIdx].push_back(hCtrl);
+    }
+}
+
+void SwitchTab(int curSel) {
+    for (int t = 0; t < 4; ++t) {
+        int showCmd = (t == curSel) ? SW_SHOW : SW_HIDE;
+        for (HWND hCtrl : g_tabPages[t]) {
+            ShowWindow(hCtrl, showCmd);
+        }
+    }
+}
 
 // Utility: Append to log window with timestamp and optional auto-scroll
 void AppendLog(const std::wstring& msg) {
@@ -587,6 +635,18 @@ void ProcessCustomCommand(const std::string& inputCmd) {
     else if (cmd.rfind("!antiover ", 0) == 0) {
         cmd = "ANTIOVER:" + cmd.substr(10);
     }
+    else if (cmd.rfind("!gold ", 0) == 0) {
+        cmd = "GOLD:" + cmd.substr(6);
+    }
+    else if (cmd.rfind("!lumber ", 0) == 0) {
+        cmd = "LUMBER:" + cmd.substr(8);
+    }
+    else if (cmd.rfind("!fog ", 0) == 0) {
+        cmd = "FOG:" + cmd.substr(5);
+    }
+    else if (cmd.rfind("!speed ", 0) == 0) {
+        cmd = "SPEED:" + cmd.substr(7);
+    }
     else if (cmd.rfind("!save ", 0) == 0) {
         std::string rest = cmd.substr(6);
         std::stringstream ss(rest);
@@ -683,6 +743,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             } else {
                 SetWindowTextW(g_hLblPipe, L"IPC 連線: 尚未連線 (請注入 JassHook.dll)");
             }
+        }
+        break;
+    }
+
+    case WM_NOTIFY: {
+        LPNMHDR pnmh = (LPNMHDR)lParam;
+        if (pnmh && pnmh->idFrom == IDC_MAIN_TAB && pnmh->code == TCN_SELCHANGE) {
+            int curSel = TabCtrl_GetCurSel(g_hTab);
+            SwitchTab(curSel);
         }
         break;
     }
@@ -802,6 +871,94 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             }
             break;
 
+        case IDC_BTN_SET_CUSTOM_SP: {
+            char buf[32];
+            GetWindowTextA(g_hEditCustomSP, buf, sizeof(buf));
+            if (strlen(buf) > 0) {
+                SendPipeCommand(std::string("ADD_SP:") + buf);
+                AppendLog(L"[英雄] 已為目標英雄增加 " + Utf8ToWide(buf) + L" 點技能點！");
+            }
+            break;
+        }
+
+        case IDC_BTN_ADD_STATS2000:
+            if (SendPipeCommand("ADD_STATS:2000")) {
+                AppendLog(L"[英雄] 已為目標英雄增加 2000 點力量與敏捷 (ADD_STATS:2000)");
+            }
+            break;
+
+        case IDC_BTN_SET_CUSTOM_STATS: {
+            char buf[32];
+            GetWindowTextA(g_hEditCustomStats, buf, sizeof(buf));
+            if (strlen(buf) > 0) {
+                SendPipeCommand(std::string("ADD_STATS:") + buf);
+                AppendLog(L"[英雄] 已為目標英雄增加 " + Utf8ToWide(buf) + L" 點全屬性！");
+            }
+            break;
+        }
+
+        case IDC_BTN_ADD_XP50000:
+            if (SendPipeCommand("ADD_XP:50000")) {
+                AppendLog(L"[英雄] 已為目標英雄增加 50000 點經驗值 (ADD_XP:50000)");
+            }
+            break;
+
+        case IDC_BTN_SET_CUSTOM_XP: {
+            char buf[32];
+            GetWindowTextA(g_hEditCustomXP, buf, sizeof(buf));
+            if (strlen(buf) > 0) {
+                SendPipeCommand(std::string("ADD_XP:") + buf);
+                AppendLog(L"[英雄] 已為目標英雄增加 " + Utf8ToWide(buf) + L" 點經驗值！");
+            }
+            break;
+        }
+
+        case IDC_BTN_SPEED_1X:
+            if (SendPipeCommand("SPEED:1")) AppendLog(L"[齒輪] 遊戲倍速恢復為 1.0x 正常速度");
+            break;
+        case IDC_BTN_SPEED_2X:
+            if (SendPipeCommand("SPEED:2")) AppendLog(L"[齒輪] 遊戲倍速設定為 2.0x 快速");
+            break;
+        case IDC_BTN_SPEED_5X:
+            if (SendPipeCommand("SPEED:5")) AppendLog(L"[齒輪] 遊戲倍速設定為 5.0x 極速");
+            break;
+        case IDC_BTN_SPEED_10X:
+            if (SendPipeCommand("SPEED:10")) AppendLog(L"[齒輪] 遊戲倍速設定為 10.0x 飛速");
+            break;
+
+        case IDC_BTN_FOG_OFF:
+            if (SendPipeCommand("FOG:0")) AppendLog(L"[視野] 已開啟全圖視野 (消除黑色迷霧與戰爭迷霧)！");
+            break;
+        case IDC_BTN_FOG_ON:
+            if (SendPipeCommand("FOG:1")) AppendLog(L"[視野] 已恢復預設地圖戰爭迷霧。");
+            break;
+
+        case IDC_BTN_SET_GOLD: {
+            char buf[32];
+            GetWindowTextA(g_hEditGold, buf, sizeof(buf));
+            if (strlen(buf) > 0) {
+                SendPipeCommand(std::string("GOLD:") + buf);
+                AppendLog(L"[資源] 已增加金幣: +" + Utf8ToWide(buf));
+            }
+            break;
+        }
+        case IDC_BTN_QUICK_GOLD:
+            if (SendPipeCommand("GOLD:100000")) AppendLog(L"[資源] 快速增加 100,000 金幣！");
+            break;
+
+        case IDC_BTN_SET_LUMBER: {
+            char buf[32];
+            GetWindowTextA(g_hEditLumber, buf, sizeof(buf));
+            if (strlen(buf) > 0) {
+                SendPipeCommand(std::string("LUMBER:") + buf);
+                AppendLog(L"[資源] 已增加木材: +" + Utf8ToWide(buf));
+            }
+            break;
+        }
+        case IDC_BTN_QUICK_LUMBER:
+            if (SendPipeCommand("LUMBER:100000")) AppendLog(L"[資源] 快速增加 100,000 木材！");
+            break;
+
         case IDC_BTN_SET_LEVEL: {
             char lvlBuf[32];
             GetWindowTextA(g_hEditLevel, lvlBuf, sizeof(lvlBuf));
@@ -898,7 +1055,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
-    icex.dwICC = ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES;
+    icex.dwICC = ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES | ICC_TAB_CLASSES;
     InitCommonControlsEx(&icex);
 
     WNDCLASSEXW wcex{};
@@ -921,7 +1078,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     g_hWnd = CreateWindowExW(
         0, L"War3DevToolUI_Class",
-        L"Warcraft III JassHook 開發者控制台 v2.0 (GUI 整合增強版)",
+        L"Warcraft III JassHook 開發者控制台 v2.0 (Tab 模組化增強版)",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         posX, posY, winWidth, winHeight,
         NULL, NULL, hInstance, NULL);
@@ -947,9 +1104,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return hCtrl;
     };
 
-    // ==========================================
-    // 1. 遊戲偵測與注入管理 (Injection Manager)
-    // ==========================================
+    auto CreateTabCtrl = [&](int tabIdx, LPCWSTR className, LPCWSTR text, DWORD style, int x, int y, int w, int h, int id) -> HWND {
+        HWND hCtrl = CreateWindowExW(0, className, text, WS_CHILD | WS_VISIBLE | style,
+                                    x, y, w, h, g_hWnd, (HMENU)(INT_PTR)id, hInstance, NULL);
+        SendMessage(hCtrl, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        AddTabCtrl(tabIdx, hCtrl);
+        return hCtrl;
+    };
+
+    // =========================================================================
+    // 常駐頂部: 遊戲偵測與注入管理 (Injection Manager - Always Visible)
+    // =========================================================================
     CreateCtrl(L"BUTTON", L"【遊戲進程與注入管理】", BS_GROUPBOX, 15, 10, 790, 95, IDC_GRP_INJECT);
     g_hLblWar3 = CreateCtrl(L"STATIC", L"遊戲進程: 偵測中...", SS_LEFT, 30, 32, 330, 20, IDC_LBL_WAR3_STATUS);
     g_hLblPipe = CreateCtrl(L"STATIC", L"IPC 連線: 尚未連線", SS_LEFT, 30, 56, 330, 20, IDC_LBL_PIPE_STATUS);
@@ -961,88 +1126,184 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     CreateCtrl(L"BUTTON", L"⚡ 一鍵注入", BS_PUSHBUTTON, 530, 26, 120, 32, IDC_BTN_INJECT);
     CreateCtrl(L"BUTTON", L"🔄 重新連線", BS_PUSHBUTTON, 660, 26, 125, 32, IDC_BTN_RECONNECT);
 
-    // ==========================================
-    // 2. 存檔管理與批量回寫 (Save Manager)
-    // ==========================================
-    CreateCtrl(L"BUTTON", L"【存檔管理與批量回寫】", BS_GROUPBOX, 15, 115, 790, 105, IDC_GRP_SAVE);
-    CreateCtrl(L"BUTTON", L"📝 產生並開啟存檔面板 (!panel)", BS_PUSHBUTTON, 30, 140, 230, 30, IDC_BTN_PANEL);
-    CreateCtrl(L"BUTTON", L"💾 批量回寫存檔 (!saveall)", BS_PUSHBUTTON, 270, 140, 200, 30, IDC_BTN_SAVEALL);
-    CreateCtrl(L"STATIC", L"(先點 !panel 在記事本修改數值並保存，再點 !saveall 回寫)", SS_LEFT, 480, 147, 310, 20, 0);
+    // =========================================================================
+    // 主 Tab 分頁標籤控制項 (Tab Control)
+    // =========================================================================
+    g_hTab = CreateWindowExW(0, WC_TABCONTROLW, L"",
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        15, 115, 790, 735, g_hWnd, (HMENU)(INT_PTR)IDC_MAIN_TAB, hInstance, NULL);
+    SendMessage(g_hTab, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
-    CreateCtrl(L"STATIC", L"手動存檔:", SS_LEFT, 30, 183, 70, 20, IDC_LBL_MANUAL_SAVE);
-    g_hEditPid = CreateCtrl(L"EDIT", L"1048602", WS_BORDER | ES_AUTOHSCROLL, 105, 180, 90, 24, IDC_EDIT_PID);
-    g_hEditKey = CreateCtrl(L"EDIT", L"存檔Key (如: IWJCS)", WS_BORDER | ES_AUTOHSCROLL, 205, 180, 160, 24, IDC_EDIT_KEY);
-    g_hEditVal = CreateCtrl(L"EDIT", L"新數值Value", WS_BORDER | ES_AUTOHSCROLL, 375, 180, 250, 24, IDC_EDIT_VAL);
-    CreateCtrl(L"BUTTON", L"發送單筆存檔", BS_PUSHBUTTON, 635, 178, 150, 28, IDC_BTN_SAVESINGLE);
+    TCITEMW tie{};
+    tie.mask = TCIF_TEXT;
+    tie.pszText = (LPWSTR)L"🦸 英雄與動作 (Hero)";
+    TabCtrl_InsertItem(g_hTab, 0, &tie);
+    tie.pszText = (LPWSTR)L"⚔️ 戰鬥與地圖 (Combat & Map)";
+    TabCtrl_InsertItem(g_hTab, 1, &tie);
+    tie.pszText = (LPWSTR)L"💎 平台與存檔 (Platform & Save)";
+    TabCtrl_InsertItem(g_hTab, 2, &tie);
+    tie.pszText = (LPWSTR)L"📡 即時監控 (Live Monitor)";
+    TabCtrl_InsertItem(g_hTab, 3, &tie);
 
-    // ==========================================
-    // 3. 商城與平台特權 (Mall & Platform VIP)
-    // ==========================================
-    CreateCtrl(L"BUTTON", L"【商城與平台特權 (DzAPI 逆向增強)】", BS_GROUPBOX, 15, 230, 790, 90, IDC_GRP_MALL);
-    CreateCtrl(L"BUTTON", L"🛒 商城全開 (!mall 2)", BS_PUSHBUTTON, 30, 253, 140, 28, IDC_BTN_MALL_ALL);
-    CreateCtrl(L"BUTTON", L"📋 商城白名單 (!mall 1)", BS_PUSHBUTTON, 178, 253, 145, 28, IDC_BTN_MALL_WHITE);
-    CreateCtrl(L"BUTTON", L"👑 平台至尊VIP (!vip 2)", BS_PUSHBUTTON, 330, 253, 150, 28, IDC_BTN_VIP_ALL);
-    CreateCtrl(L"BUTTON", L"❌ 關閉商城 (!mall 0)", BS_PUSHBUTTON, 488, 253, 140, 28, IDC_BTN_MALL_OFF);
-    g_hBtnAntiOver = CreateCtrl(L"BUTTON", L"🛡️ 防失敗保護 (目前: 開)", BS_PUSHBUTTON, 635, 253, 150, 28, IDC_BTN_ANTIOVER);
+    // =========================================================================
+    // 🏷️ TAB 0: 【英雄與動作】 (Hero & Unit Actions)
+    // =========================================================================
+    // 1. 常用戰鬥與控制
+    CreateTabCtrl(0, L"BUTTON", L"【常用英雄控制 (支援遊戲內熱鍵 Ctrl+M / Ctrl+G / Ctrl+H / Ctrl+K)】", BS_GROUPBOX, 30, 155, 760, 105, 0);
+    CreateTabCtrl(0, L"BUTTON", L"🌀 瞬移至滑鼠 (Ctrl+M)", BS_PUSHBUTTON, 45, 185, 170, 36, IDC_BTN_TELEPORT);
+    CreateTabCtrl(0, L"BUTTON", L"🛡️ 設為無敵 (Ctrl+G)", BS_PUSHBUTTON, 225, 185, 170, 36, IDC_BTN_GOD);
+    CreateTabCtrl(0, L"BUTTON", L"❤️ 生命全滿 (Ctrl+H)", BS_PUSHBUTTON, 405, 185, 170, 36, IDC_BTN_HEAL);
+    CreateTabCtrl(0, L"BUTTON", L"💀 秒殺目標 (Ctrl+K)", BS_PUSHBUTTON, 585, 185, 185, 36, IDC_BTN_KILL);
+    CreateTabCtrl(0, L"STATIC", L"提示: 選取單位後點擊按鈕，或在遊戲中直接按鍵即可發動。瞬移直達滑鼠地表，無敵鎖定10億生命值。", SS_LEFT, 45, 230, 725, 20, 0);
 
-    CreateCtrl(L"STATIC", L"地圖等級:", SS_LEFT, 30, 290, 70, 20, IDC_LBL_LEVEL);
-    g_hEditLevel = CreateCtrl(L"EDIT", L"99", WS_BORDER | ES_NUMBER, 105, 288, 60, 24, IDC_EDIT_LEVEL);
-    CreateCtrl(L"BUTTON", L"設定等級", BS_PUSHBUTTON, 175, 287, 85, 26, IDC_BTN_SET_LEVEL);
+    // 2. 英雄數值與進度增強
+    CreateTabCtrl(0, L"BUTTON", L"【英雄數值與進度增強 (DzAPI 記憶體逆向)】", BS_GROUPBOX, 30, 270, 760, 180, 0);
+    // 技能點
+    CreateTabCtrl(0, L"BUTTON", L"🌟 技能點 +10", BS_PUSHBUTTON, 45, 300, 125, 30, IDC_BTN_ADD_SP10);
+    CreateTabCtrl(0, L"BUTTON", L"🌟 技能點 +50", BS_PUSHBUTTON, 180, 300, 125, 30, IDC_BTN_ADD_SP50);
+    CreateTabCtrl(0, L"STATIC", L"自訂點數:", SS_LEFT, 320, 306, 68, 20, 0);
+    g_hEditCustomSP = CreateTabCtrl(0, L"EDIT", L"100", WS_BORDER | ES_NUMBER, 395, 303, 80, 24, IDC_EDIT_CUSTOM_SP);
+    CreateTabCtrl(0, L"BUTTON", L"增加自訂技能點", BS_PUSHBUTTON, 485, 301, 150, 28, IDC_BTN_SET_CUSTOM_SP);
+    // 屬性
+    CreateTabCtrl(0, L"BUTTON", L"💪 全屬性 +500", BS_PUSHBUTTON, 45, 340, 125, 30, IDC_BTN_ADD_STATS);
+    CreateTabCtrl(0, L"BUTTON", L"💪 全屬性 +2000", BS_PUSHBUTTON, 180, 340, 125, 30, IDC_BTN_ADD_STATS2000);
+    CreateTabCtrl(0, L"STATIC", L"自訂屬性:", SS_LEFT, 320, 346, 68, 20, 0);
+    g_hEditCustomStats = CreateTabCtrl(0, L"EDIT", L"5000", WS_BORDER | ES_NUMBER, 395, 343, 80, 24, IDC_EDIT_CUSTOM_STATS);
+    CreateTabCtrl(0, L"BUTTON", L"增加自訂全屬性", BS_PUSHBUTTON, 485, 341, 150, 28, IDC_BTN_SET_CUSTOM_STATS);
+    // 經驗
+    CreateTabCtrl(0, L"BUTTON", L"📖 經驗 +10000", BS_PUSHBUTTON, 45, 380, 125, 30, IDC_BTN_ADD_XP);
+    CreateTabCtrl(0, L"BUTTON", L"📖 經驗 +50000", BS_PUSHBUTTON, 180, 380, 125, 30, IDC_BTN_ADD_XP50000);
+    CreateTabCtrl(0, L"STATIC", L"自訂經驗:", SS_LEFT, 320, 386, 68, 20, 0);
+    g_hEditCustomXP = CreateTabCtrl(0, L"EDIT", L"100000", WS_BORDER | ES_NUMBER, 395, 383, 80, 24, IDC_EDIT_CUSTOM_XP);
+    CreateTabCtrl(0, L"BUTTON", L"增加自訂經驗值", BS_PUSHBUTTON, 485, 381, 150, 28, IDC_BTN_SET_CUSTOM_XP);
+    CreateTabCtrl(0, L"STATIC", L"註: 屬性修改會同步提升目標英雄的力量與敏捷，技能點與經驗值即時生效不降級。", SS_LEFT, 45, 420, 725, 20, 0);
 
-    CreateCtrl(L"STATIC", L"商城隨機百分比 (%):", SS_LEFT, 285, 290, 140, 20, IDC_LBL_PERCENT);
-    g_hEditPercent = CreateCtrl(L"EDIT", L"30", WS_BORDER | ES_NUMBER, 430, 288, 55, 24, IDC_EDIT_PERCENT);
-    CreateCtrl(L"BUTTON", L"設定百分比 (模式3)", BS_PUSHBUTTON, 495, 287, 140, 26, IDC_BTN_SET_PERCENT);
+    // 3. 遊戲內熱鍵指引與操作說明
+    CreateTabCtrl(0, L"BUTTON", L"【遊戲內熱鍵指引與底層技術說明】", BS_GROUPBOX, 30, 460, 760, 240, 0);
+    CreateTabCtrl(0, L"STATIC", L"▶ [Ctrl + M] : 瞬移選中單位至滑鼠指向地表 (調用 Game.dll CWidget::SetCoord，穿越障礙物無延遲)", SS_LEFT, 45, 490, 725, 20, 0);
+    CreateTabCtrl(0, L"STATIC", L"▶ [Ctrl + G] : 將選中單位改為官方無敵 (調用 CGameState::SetUnitInvulnerable，並鎖定 10 億 HP)", SS_LEFT, 45, 520, 725, 20, 0);
+    CreateTabCtrl(0, L"STATIC", L"▶ [Ctrl + H] : 補滿選中/懸停單位生命值 (動態修復目標 HP 最大值)", SS_LEFT, 45, 550, 725, 20, 0);
+    CreateTabCtrl(0, L"STATIC", L"▶ [Ctrl + K] : 秒殺選中/懸停目標單位 (目標 HP 歸零)", SS_LEFT, 45, 580, 725, 20, 0);
+    CreateTabCtrl(0, L"STATIC", L"▶ 指令支援   : 在即時監控分頁可輸入 !tp, !god, !heal, !kill, !sp <點數>, !stats <數值>, !xp <經驗>", SS_LEFT, 45, 610, 725, 20, 0);
+    CreateTabCtrl(0, L"STATIC", L"▶ 安全機制   : 所有操作均在魔獸爭霸主線程執行，並具有 SEH 異常保護，杜絕任何遊戲卡死閃退。", SS_LEFT, 45, 640, 725, 20, 0);
 
-    // ==========================================
-    // 4. 英雄與選取單位增強 (瞬移 / 無敵 / 屬性)
-    // ==========================================
-    CreateCtrl(L"BUTTON", L"【英雄與選取單位增強 (支援遊戲內熱鍵 Ctrl+M / Ctrl+G / Ctrl+H / Ctrl+K)】", BS_GROUPBOX, 15, 328, 790, 106, IDC_GRP_HERO);
-    // 第一行: 瞬移、無敵、滿血、秒殺
-    CreateCtrl(L"BUTTON", L"🌀 瞬移至滑鼠 (Ctrl+M)", BS_PUSHBUTTON, 30, 355, 180, 30, IDC_BTN_TELEPORT);
-    CreateCtrl(L"BUTTON", L"🛡️ 設為無敵 (Ctrl+G)", BS_PUSHBUTTON, 220, 355, 175, 30, IDC_BTN_GOD);
-    CreateCtrl(L"BUTTON", L"❤️ 生命全滿 (Ctrl+H)", BS_PUSHBUTTON, 405, 355, 185, 30, IDC_BTN_HEAL);
-    CreateCtrl(L"BUTTON", L"💀 秒殺目標 (Ctrl+K)", BS_PUSHBUTTON, 600, 355, 185, 30, IDC_BTN_KILL);
-    // 第二行: 技能點、屬性、經驗
-    CreateCtrl(L"BUTTON", L"🌟 技能點 +10", BS_PUSHBUTTON, 30, 393, 180, 28, IDC_BTN_ADD_SP10);
-    CreateCtrl(L"BUTTON", L"🌟 技能點 +50", BS_PUSHBUTTON, 220, 393, 175, 28, IDC_BTN_ADD_SP50);
-    CreateCtrl(L"BUTTON", L"💪 全屬性 +500", BS_PUSHBUTTON, 405, 393, 185, 28, IDC_BTN_ADD_STATS);
-    CreateCtrl(L"BUTTON", L"📖 經驗 +10000", BS_PUSHBUTTON, 600, 393, 185, 28, IDC_BTN_ADD_XP);
+    // =========================================================================
+    // 🏷️ TAB 1: 【戰鬥與地圖】 (Combat & Map)
+    // =========================================================================
+    // 1. 遊戲倍速齒輪
+    CreateTabCtrl(1, L"BUTTON", L"【⏱️ 遊戲倍速齒輪 (跳過防守波次與計時等待)】", BS_GROUPBOX, 30, 155, 760, 105, 0);
+    CreateTabCtrl(1, L"BUTTON", L"1.0x 正常速度", BS_PUSHBUTTON, 45, 185, 130, 36, IDC_BTN_SPEED_1X);
+    CreateTabCtrl(1, L"BUTTON", L"⚡ 2.0x 快速", BS_PUSHBUTTON, 190, 185, 130, 36, IDC_BTN_SPEED_2X);
+    CreateTabCtrl(1, L"BUTTON", L"🚀 5.0x 極速", BS_PUSHBUTTON, 335, 185, 130, 36, IDC_BTN_SPEED_5X);
+    CreateTabCtrl(1, L"BUTTON", L"⏩ 10.0x 飛速", BS_PUSHBUTTON, 480, 185, 130, 36, IDC_BTN_SPEED_10X);
+    CreateTabCtrl(1, L"STATIC", L"說明: 可直接調整魔獸爭霸遊戲運算幀率，快速推進波次與計時器，節省大量等待時間。", SS_LEFT, 45, 230, 725, 20, 0);
 
-    // ==========================================
-    // 5. 自訂指令輸入 (Command Input)
-    // ==========================================
-    CreateCtrl(L"BUTTON", L"【自訂指令與 Native 呼叫】", BS_GROUPBOX, 15, 444, 790, 68, IDC_GRP_CMD);
-    g_hEditCmd = CreateCtrl(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, 30, 468, 630, 28, IDC_EDIT_CMD);
-    CreateCtrl(L"BUTTON", L"發送指令 (Enter)", BS_PUSHBUTTON, 670, 467, 120, 30, IDC_BTN_SEND_CMD);
+    // 2. 迷霧與全圖視野
+    CreateTabCtrl(1, L"BUTTON", L"【👁️ 迷霧與全圖視野 (開圖透視)】", BS_GROUPBOX, 30, 270, 760, 105, 0);
+    CreateTabCtrl(1, L"BUTTON", L"👁️ 開啟全圖視野 (消除黑色迷霧與戰爭迷霧)", BS_PUSHBUTTON, 45, 300, 340, 36, IDC_BTN_FOG_OFF);
+    CreateTabCtrl(1, L"BUTTON", L"🔒 恢復預設迷霧 (開啟迷霧)", BS_PUSHBUTTON, 400, 300, 250, 36, IDC_BTN_FOG_ON);
+    CreateTabCtrl(1, L"STATIC", L"說明: 透過底層調用 FogEnable 與 FogMaskEnable，全開地圖視野且不被地圖防作弊反制。", SS_LEFT, 45, 345, 725, 20, 0);
 
-    // ==========================================
-    // 6. 即時系統日誌與 JASS / DzAPI 即時監控串流
-    // ==========================================
-    CreateCtrl(L"BUTTON", L"【即時系統日誌與 JASS / DzAPI 監控串流】", BS_GROUPBOX, 15, 520, 790, 325, IDC_GRP_LOG);
-    g_hEditLog = CreateCtrl(L"EDIT", L"", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
-                            30, 545, 760, 255, IDC_EDIT_LOG);
+    // 3. 玩家資源修改
+    CreateTabCtrl(1, L"BUTTON", L"【💰 玩家資源修改 (金幣與木材)】", BS_GROUPBOX, 30, 385, 760, 130, 0);
+    CreateTabCtrl(1, L"STATIC", L"金幣 (Gold):", SS_LEFT, 45, 415, 90, 20, 0);
+    g_hEditGold = CreateTabCtrl(1, L"EDIT", L"100000", WS_BORDER | ES_NUMBER, 140, 412, 100, 24, IDC_EDIT_GOLD);
+    CreateTabCtrl(1, L"BUTTON", L"💰 獲得金幣", BS_PUSHBUTTON, 250, 410, 120, 28, IDC_BTN_SET_GOLD);
+    CreateTabCtrl(1, L"BUTTON", L"+100,000", BS_PUSHBUTTON, 380, 410, 95, 28, IDC_BTN_QUICK_GOLD);
 
-    CreateCtrl(L"BUTTON", L"🧹 清除日誌", BS_PUSHBUTTON, 30, 807, 100, 28, IDC_BTN_CLEAR_LOG);
-    CreateCtrl(L"BUTTON", L"📋 複製日誌", BS_PUSHBUTTON, 138, 807, 100, 28, IDC_BTN_COPY_LOG);
-    g_hChkAutoScroll = CreateCtrl(L"BUTTON", L"自動滾動", BS_AUTOCHECKBOX, 248, 809, 85, 24, IDC_CHK_AUTO_SCROLL);
+    CreateTabCtrl(1, L"STATIC", L"木材 (Lumber):", SS_LEFT, 45, 455, 90, 20, 0);
+    g_hEditLumber = CreateTabCtrl(1, L"EDIT", L"100000", WS_BORDER | ES_NUMBER, 140, 452, 100, 24, IDC_EDIT_LUMBER);
+    CreateTabCtrl(1, L"BUTTON", L"🌲 獲得木材", BS_PUSHBUTTON, 250, 450, 120, 28, IDC_BTN_SET_LUMBER);
+    CreateTabCtrl(1, L"BUTTON", L"+100,000", BS_PUSHBUTTON, 380, 450, 95, 28, IDC_BTN_QUICK_LUMBER);
+    CreateTabCtrl(1, L"STATIC", L"說明: 直接修改玩家結構體資源偏移，即時入帳可用於建造、升級與商店購買。", SS_LEFT, 45, 490, 725, 20, 0);
+
+    // 4. 戰鬥擴充框架
+    CreateTabCtrl(1, L"BUTTON", L"【⚡ 戰鬥機制與擴充說明】", BS_GROUPBOX, 30, 525, 760, 175, 0);
+    CreateTabCtrl(1, L"STATIC", L"▶ 技能無冷卻 (0 CD) 與 無限法力 (100% Mana) 框架已預載，支援透過自訂指令擴充。", SS_LEFT, 45, 555, 725, 20, 0);
+    CreateTabCtrl(1, L"STATIC", L"▶ 支援在控制台輸入指令: !speed <倍率>, !fog <0|1>, !gold <數值>, !lumber <數值>", SS_LEFT, 45, 585, 725, 20, 0);
+    CreateTabCtrl(1, L"STATIC", L"▶ 透過 Command Registry 函數註冊表架構，未來新增任何功能均零衝突、即插即用！", SS_LEFT, 45, 615, 725, 20, 0);
+
+    // =========================================================================
+    // 🏷️ TAB 2: 【平台與存檔】 (Platform & Save)
+    // =========================================================================
+    // 1. 商城與平台特權
+    CreateTabCtrl(2, L"BUTTON", L"【商城與平台特權 (DzAPI 逆向增強)】", BS_GROUPBOX, 30, 155, 760, 145, 0);
+    CreateTabCtrl(2, L"BUTTON", L"🛒 商城全開 (!mall 2)", BS_PUSHBUTTON, 45, 185, 160, 32, IDC_BTN_MALL_ALL);
+    CreateTabCtrl(2, L"BUTTON", L"📋 商城白名單 (!mall 1)", BS_PUSHBUTTON, 215, 185, 160, 32, IDC_BTN_MALL_WHITE);
+    CreateTabCtrl(2, L"BUTTON", L"👑 平台至尊VIP (!vip 2)", BS_PUSHBUTTON, 385, 185, 160, 32, IDC_BTN_VIP_ALL);
+    CreateTabCtrl(2, L"BUTTON", L"❌ 關閉商城 (!mall 0)", BS_PUSHBUTTON, 555, 185, 150, 32, IDC_BTN_MALL_OFF);
+
+    g_hBtnAntiOver = CreateTabCtrl(2, L"BUTTON", L"🛡️ 防失敗保護 (目前: 開)", BS_PUSHBUTTON, 45, 228, 170, 30, IDC_BTN_ANTIOVER);
+    CreateTabCtrl(2, L"STATIC", L"地圖等級:", SS_LEFT, 230, 233, 65, 20, IDC_LBL_LEVEL);
+    g_hEditLevel = CreateTabCtrl(2, L"EDIT", L"99", WS_BORDER | ES_NUMBER, 298, 230, 55, 24, IDC_EDIT_LEVEL);
+    CreateTabCtrl(2, L"BUTTON", L"設定等級", BS_PUSHBUTTON, 360, 228, 85, 28, IDC_BTN_SET_LEVEL);
+
+    CreateTabCtrl(2, L"STATIC", L"商城隨機百分比 (%):", SS_LEFT, 460, 233, 130, 20, IDC_LBL_PERCENT);
+    g_hEditPercent = CreateTabCtrl(2, L"EDIT", L"30", WS_BORDER | ES_NUMBER, 595, 230, 50, 24, IDC_EDIT_PERCENT);
+    CreateTabCtrl(2, L"BUTTON", L"設定百分比 (模式3)", BS_PUSHBUTTON, 652, 228, 125, 28, IDC_BTN_SET_PERCENT);
+    CreateTabCtrl(2, L"STATIC", L"說明: 至尊VIP解鎖翅膀光環特權，防失敗保護攔截地圖非正常結算，商城支援全開或白名單過濾陷阱道具。", SS_LEFT, 45, 268, 725, 20, 0);
+
+    // 2. 存檔管理與批量回寫
+    CreateTabCtrl(2, L"BUTTON", L"【存檔管理與批量回寫 (Save Manager)】", BS_GROUPBOX, 30, 310, 760, 215, 0);
+    CreateTabCtrl(2, L"BUTTON", L"📝 產生並開啟存檔面板 (!panel)", BS_PUSHBUTTON, 45, 340, 230, 34, IDC_BTN_PANEL);
+    CreateTabCtrl(2, L"BUTTON", L"💾 批量回寫存檔 (!saveall)", BS_PUSHBUTTON, 290, 340, 200, 34, IDC_BTN_SAVEALL);
+    CreateTabCtrl(2, L"STATIC", L"(在記事本修改數值保存後，點 !saveall 回寫至遊戲)", SS_LEFT, 500, 347, 280, 20, 0);
+
+    CreateTabCtrl(2, L"STATIC", L"手動存檔:", SS_LEFT, 45, 390, 68, 20, IDC_LBL_MANUAL_SAVE);
+    g_hEditPid = CreateTabCtrl(2, L"EDIT", L"1048602", WS_BORDER | ES_AUTOHSCROLL, 120, 387, 85, 24, IDC_EDIT_PID);
+    g_hEditKey = CreateTabCtrl(2, L"EDIT", L"存檔Key (如: IWJCS)", WS_BORDER | ES_AUTOHSCROLL, 215, 387, 160, 24, IDC_EDIT_KEY);
+    g_hEditVal = CreateTabCtrl(2, L"EDIT", L"新數值Value", WS_BORDER | ES_AUTOHSCROLL, 385, 387, 220, 24, IDC_EDIT_VAL);
+    CreateTabCtrl(2, L"BUTTON", L"發送單筆存檔", BS_PUSHBUTTON, 615, 385, 130, 28, IDC_BTN_SAVESINGLE);
+
+    CreateTabCtrl(2, L"BUTTON", L"📂 開啟 local_save.txt", BS_PUSHBUTTON, 45, 430, 180, 30, IDC_BTN_OPEN_SAVE);
+    CreateTabCtrl(2, L"BUTTON", L"📝 開啟 save_panel.txt", BS_PUSHBUTTON, 240, 430, 180, 30, IDC_BTN_OPEN_PANEL);
+    CreateTabCtrl(2, L"BUTTON", L"📄 開啟 dztrace.log", BS_PUSHBUTTON, 435, 430, 180, 30, IDC_BTN_OPEN_TRACE);
+    CreateTabCtrl(2, L"STATIC", L"說明: 支援在遊戲內動態向伺服器寫入存檔數值，並自動偽造 JASS 字符串返回。", SS_LEFT, 45, 480, 725, 20, 0);
+
+    // 3. 說明
+    CreateTabCtrl(2, L"BUTTON", L"【平台存檔與反作弊機制說明】", BS_GROUPBOX, 30, 535, 760, 165, 0);
+    CreateTabCtrl(2, L"STATIC", L"▶ 每次進入遊戲載入存檔時，工具會自動擷取伺服器下發的存檔變數並記錄到 local_save.txt。", SS_LEFT, 45, 565, 725, 20, 0);
+    CreateTabCtrl(2, L"STATIC", L"▶ 點選「產生並開啟存檔面板」可將所有偵測到的 Key 格式化輸出到記事本，供您任意修改數值。", SS_LEFT, 45, 595, 725, 20, 0);
+    CreateTabCtrl(2, L"STATIC", L"▶ 修改完成後在記事本儲存，點選「批量回寫存檔」即可透過 Named Pipe 一鍵同步進遊戲！", SS_LEFT, 45, 625, 725, 20, 0);
+
+    // =========================================================================
+    // 🏷️ TAB 3: 【即時監控】 (Live Monitor)
+    // =========================================================================
+    // 1. 自訂指令輸入
+    CreateTabCtrl(3, L"BUTTON", L"【自訂指令與 Native 動態呼叫】", BS_GROUPBOX, 30, 155, 760, 68, IDC_GRP_CMD);
+    g_hEditCmd = CreateTabCtrl(3, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, 45, 180, 595, 28, IDC_EDIT_CMD);
+    CreateTabCtrl(3, L"BUTTON", L"發送指令 (Enter)", BS_PUSHBUTTON, 650, 179, 125, 30, IDC_BTN_SEND_CMD);
+
+    // 2. 即時系統日誌與串流
+    CreateTabCtrl(3, L"BUTTON", L"【即時系統日誌與 JASS / DzAPI 即時監控串流】", BS_GROUPBOX, 30, 230, 760, 480, IDC_GRP_LOG);
+    g_hEditLog = CreateTabCtrl(3, L"EDIT", L"", WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+                            45, 255, 730, 405, IDC_EDIT_LOG);
+
+    CreateTabCtrl(3, L"BUTTON", L"🧹 清除日誌", BS_PUSHBUTTON, 45, 672, 100, 28, IDC_BTN_CLEAR_LOG);
+    CreateTabCtrl(3, L"BUTTON", L"📋 複製日誌", BS_PUSHBUTTON, 155, 672, 100, 28, IDC_BTN_COPY_LOG);
+    g_hChkAutoScroll = CreateTabCtrl(3, L"BUTTON", L"自動滾動", BS_AUTOCHECKBOX, 265, 674, 85, 24, IDC_CHK_AUTO_SCROLL);
     SendMessage(g_hChkAutoScroll, BM_SETCHECK, BST_CHECKED, 0);
 
-    CreateCtrl(L"BUTTON", L"📄 dztrace.log", BS_PUSHBUTTON, 343, 807, 135, 28, IDC_BTN_OPEN_TRACE);
-    CreateCtrl(L"BUTTON", L"📂 local_save.txt", BS_PUSHBUTTON, 488, 807, 145, 28, IDC_BTN_OPEN_SAVE);
-    CreateCtrl(L"BUTTON", L"📝 save_panel.txt", BS_PUSHBUTTON, 643, 807, 147, 28, IDC_BTN_OPEN_PANEL);
+    CreateTabCtrl(3, L"BUTTON", L"📄 開啟 dztrace.log", BS_PUSHBUTTON, 360, 672, 135, 28, IDC_BTN_OPEN_TRACE);
+    CreateTabCtrl(3, L"BUTTON", L"📂 local_save.txt", BS_PUSHBUTTON, 505, 672, 135, 28, IDC_BTN_OPEN_SAVE);
+    CreateTabCtrl(3, L"BUTTON", L"📝 save_panel.txt", BS_PUSHBUTTON, 650, 672, 125, 28, IDC_BTN_OPEN_PANEL);
 
     // Subclass Edit Controls for Enter key
     g_oldEditCmdProc = (WNDPROC)SetWindowLongPtr(g_hEditCmd, GWLP_WNDPROC, (LONG_PTR)EditCmdSubclassProc);
     g_oldEditValProc = (WNDPROC)SetWindowLongPtr(g_hEditVal, GWLP_WNDPROC, (LONG_PTR)EditValSubclassProc);
 
+    // 預設顯示 Tab 0 (英雄與動作)
+    SwitchTab(0);
+
     ShowWindow(g_hWnd, nCmdShow);
     UpdateWindow(g_hWnd);
 
-    AppendLog(L"=== Warcraft III JassHook 開發者輔助控制台 v2.0 (增強版) 啟動完成 ===");
+    AppendLog(L"=== Warcraft III JassHook 開發者輔助控制台 v2.0 (Tab 增強版) 啟動完成 ===");
     AppendLog(L"[*] 系統已具備 SeDebugPrivilege 管理員除錯權限。");
+    AppendLog(L"[*] 已升級為 Tab 分頁架構: 【英雄與動作】、【戰鬥與地圖】、【平台與存檔】、【即時監控】。");
     AppendLog(L"[*] 記憶體瞬移與無敵已就緒: 瞬移至滑鼠 (Ctrl+M)、無敵神模式 (Ctrl+G)、滿血 (Ctrl+H)、秒殺 (Ctrl+K)。");
+    AppendLog(L"[*] 戰鬥與地圖輔助已啟用: 遊戲倍速齒輪 (1x~10x)、全圖開霧、資源一鍵修改 (金幣/木材)。");
     AppendLog(L"[*] DzAPI 即時監控串流已啟用: 平台特權、商城偽造、伺服器存檔讀寫均即時串流於此。");
-    AppendLog(L"[*] 支援指令: !tp, !god, !heal, !kill, !sp <點數>, !stats <屬性>, !xp <經驗>, !vip <0-2>, !panel, !saveall, !mall <0-3>");
 
     // 啟動背景 Named Pipe 日誌串流監聽線程
     g_hPipeReaderThread = CreateThread(NULL, 0, PipeLogReaderThread, NULL, 0, NULL);

@@ -4,8 +4,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_set>
+#include <unordered_map>
 #include <string>
 #include <fstream>
+#include <sstream>
+#include <functional>
 #include "dz_registry.h"
 
 HMODULE g_hModule = NULL;
@@ -576,203 +579,504 @@ void FreeFakeJassString(DWORD jassStr) {
 }
 
 // =========================================================================
-// Advanced Hero & Unit Manipulation (Grounded in DzAPI_Structures.h)
+// Advanced Command Registry & Dispatcher (Command Pattern Architecture)
 // =========================================================================
-void HandleHeroAction(int action, int param) {
-    __try {
-        DWORD gameBase = 0x6F000000;
-        DWORD targetUnit = 0;
-        
-        // 1. Try selected unit first (CGameWar3 + 0x58 -> CPlayerWar3 -> selection list)
-        DWORD* pGame = (DWORD*)(gameBase + 0xBE4238);
-        if (pGame && *pGame) {
-            DWORD pGameWar3 = *pGame;
-            DWORD playerId = *(DWORD*)(pGameWar3 + 0x28);
-            if (playerId < 16) {
-                DWORD player = *(DWORD*)(pGameWar3 + 0x58 + playerId * 4);
-                if (player) {
-                    DWORD listRoot = *(DWORD*)(player + 0x34);
-                    if (listRoot) {
-                        DWORD listHead = *(DWORD*)(listRoot + 0x1F0);
-                        if (listHead) {
-                            DWORD listLength = *(DWORD*)(listRoot + 0x1F8);
-                            if (listLength > 0) {
-                                DWORD firstNode = *(DWORD*)(listHead + 0x00);
-                                if (firstNode) {
-                                    targetUnit = *(DWORD*)(firstNode + 0x08);
-                                }
+typedef void (*CommandHandler)(const std::string& args);
+std::unordered_map<std::string, CommandHandler> g_commandMap;
+
+void RegisterCommand(const std::string& name, CommandHandler handler) {
+    g_commandMap[name] = handler;
+}
+
+DWORD GetTargetUnit() {
+    DWORD gameBase = 0x6F000000;
+    DWORD targetUnit = 0;
+    
+    // 1. Try selected unit first (CGameWar3 + 0x58 -> CPlayerWar3 -> selection list)
+    DWORD* pGame = (DWORD*)(gameBase + 0xBE4238);
+    if (pGame && *pGame) {
+        DWORD pGameWar3 = *pGame;
+        DWORD playerId = *(DWORD*)(pGameWar3 + 0x28);
+        if (playerId < 16) {
+            DWORD player = *(DWORD*)(pGameWar3 + 0x58 + playerId * 4);
+            if (player) {
+                DWORD listRoot = *(DWORD*)(player + 0x34);
+                if (listRoot) {
+                    DWORD listHead = *(DWORD*)(listRoot + 0x1F0);
+                    if (listHead) {
+                        DWORD listLength = *(DWORD*)(listRoot + 0x1F8);
+                        if (listLength > 0) {
+                            DWORD firstNode = *(DWORD*)(listHead + 0x00);
+                            if (firstNode) {
+                                targetUnit = *(DWORD*)(firstNode + 0x08);
                             }
                         }
                     }
                 }
             }
         }
-        
-        // 2. If no selected unit, try unit under mouse cursor (CGameUI + 0x3BC -> +0x244)
-        if (!targetUnit) {
-            DWORD* pUI = (DWORD*)(gameBase + 0xBE6350);
-            if (pUI && *pUI) {
-                DWORD worldFrame = *(DWORD*)(*pUI + 0x3BC);
-                if (worldFrame) {
-                    targetUnit = *(DWORD*)(worldFrame + 0x244);
-                }
-            }
-        }
-        
-        if (!targetUnit) {
-            ConsoleLog("[HeroAction] No unit selected or hovered under cursor!\n");
-            return;
-        }
-
-        // Action 1: Kill Target Unit
-        if (action == 1) {
-            DWORD hpIndex = *(DWORD*)(targetUnit + 0xA0);
-            DWORD thisGame = *(DWORD*)(gameBase + 0xBE40A8);
-            if (thisGame) {
-                DWORD gameMemory = *(DWORD*)(thisGame + 0x0C);
-                if (gameMemory) {
-                    DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
-                    DWORD address1 = *(DWORD*)entryAddress;
-                    if (address1) {
-                        float* hpValue = (float*)(address1 + 0x78);
-                        *hpValue = 0.0f;
-                        ConsoleLog("[HeroAction] Instantly killed target unit!\n");
-                    }
-                }
-            }
-            return;
-        }
-
-        // Action 2: Heal (Full HP Restore)
-        if (action == 2) {
-            DWORD hpIndex = *(DWORD*)(targetUnit + 0xA0);
-            DWORD thisGame = *(DWORD*)(gameBase + 0xBE40A8);
-            if (thisGame) {
-                DWORD gameMemory = *(DWORD*)(thisGame + 0x0C);
-                if (gameMemory) {
-                    DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
-                    DWORD address1 = *(DWORD*)entryAddress;
-                    if (address1) {
-                        float maxHp = *(float*)(address1 + 0x74);
-                        float* hpValue = (float*)(address1 + 0x78);
-                        *hpValue = (maxHp > 0.0f) ? maxHp : 999999.0f;
-                        ConsoleLog("[HeroAction] Restored target unit HP to maximum!\n");
-                    }
-                }
-            }
-            return;
-        }
-
-        // Actions 3, 4, 5: CAbilityHero modifications (+0x1F0)
-        DWORD heroAbility = *(DWORD*)(targetUnit + 0x1F0);
-        if (!heroAbility) {
-            ConsoleLog("[HeroAction] Target unit is not a Hero (no CAbilityHero at +0x1F0).\n");
-            return;
-        }
-
-        if (action == 3) {
-            // Add Skill Points (+0x90)
-            int* pSp = (int*)(heroAbility + 0x90);
-            *pSp += param;
-            char log[128];
-            sprintf_s(log, sizeof(log), "[HeroAction] Added %d Skill Points! (Total: %d)\n", param, *pSp);
-            ConsoleLog(log);
-        }
-        else if (action == 4) {
-            // Boost STR (+0x94) and AGI (+0xA8)
-            int* pStr = (int*)(heroAbility + 0x94);
-            int* pAgi = (int*)(heroAbility + 0xA8);
-            *pStr += param;
-            *pAgi += param;
-            char log[128];
-            sprintf_s(log, sizeof(log), "[HeroAction] Boosted Stats +%d! (STR: %d, AGI: %d)\n", param, *pStr, *pAgi);
-            ConsoleLog(log);
-        }
-        else if (action == 5) {
-            // Add Experience XP (+0x8C)
-            int* pXp = (int*)(heroAbility + 0x8C);
-            *pXp += param;
-            char log[128];
-            sprintf_s(log, sizeof(log), "[HeroAction] Added %d XP! (Total: %d)\n", param, *pXp);
-            ConsoleLog(log);
-        }
-
-        // Action 6: Teleport Selected Unit to Mouse Position (CWidget::SetCoord @ Game.dll + 0x635DE0)
-        if (action == 6) {
-            HMODULE hPlugin = GetModuleHandleA("War3Plugin.dll");
-            if (!hPlugin) {
-                ConsoleLog("[Teleport] War3Plugin.dll not ready!\n");
-                return;
-            }
-            float mouseX = *(float*)((BYTE*)hPlugin + 0x2656D8);
-            float mouseY = *(float*)((BYTE*)hPlugin + 0x2656DC);
-            if (mouseX == 0.0f && mouseY == 0.0f) {
-                ConsoleLog("[Teleport] Mouse cursor is outside map or terrain coords not ready.\n");
-                return;
-            }
-            DWORD fnSetCoord = gameBase + 0x635DE0;
-            __try {
-                __asm {
-                    mov ecx, targetUnit
-                    push 0
-                    push -1
-                    push 0
-                    push 0
-                    push 0
-                    push 0
-                    push -1
-                    push 1
-                    push 1
-                    lea eax, mouseY
-                    push eax
-                    lea eax, mouseX
-                    push eax
-                    call fnSetCoord
-                }
-                char log[128];
-                sprintf_s(log, sizeof(log), "[Teleport] Teleported unit to mouse position: (X: %.1f, Y: %.1f)!\n", mouseX, mouseY);
-                ConsoleLog(log);
-            } __except(EXCEPTION_EXECUTE_HANDLER) {
-                ConsoleLog("[Teleport] Exception caught during CWidget::SetCoord.\n");
-            }
-            return;
-        }
-
-        // Action 7: Make Unit Invulnerable (God Mode - Official ability + 1 Billion HP)
-        if (action == 7) {
-            // 1. Call Game.dll CGameState::SetUnitInvulnerable(BOOL flag, CUnit* unit) @ 0x210CB0
-            DWORD pGameWar3 = *(DWORD*)(gameBase + 0xBE4238);
-            if (pGameWar3) {
-                DWORD gameState = *(DWORD*)(pGameWar3 + 0x1C);
-                if (gameState) {
-                    typedef void(__thiscall *SetUnitInvul_t)(DWORD thisPtr, BOOL flag, DWORD unit);
-                    SetUnitInvul_t fnSetInvul = (SetUnitInvul_t)(gameBase + 0x210CB0);
-                    fnSetInvul(gameState, TRUE, targetUnit);
-                }
-            }
-
-            // 2. Maximize and lock HP to 999,999,999.0f
-            DWORD hpIndex = *(DWORD*)(targetUnit + 0xA0);
-            DWORD thisGame = *(DWORD*)(gameBase + 0xBE40A8);
-            if (thisGame) {
-                DWORD gameMemory = *(DWORD*)(thisGame + 0x0C);
-                if (gameMemory) {
-                    DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
-                    DWORD address1 = *(DWORD*)entryAddress;
-                    if (address1) {
-                        float* maxHp = (float*)(address1 + 0x74);
-                        float* hpValue = (float*)(address1 + 0x78);
-                        *maxHp = 999999999.0f;
-                        *hpValue = 999999999.0f;
-                    }
-                }
-            }
-            ConsoleLog("[HeroAction] Target unit is now officially INVULNERABLE (God Mode Active)!\n");
-            return;
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        ConsoleLog("[HeroAction] Exception caught during hero manipulation.\n");
     }
+    
+    // 2. Try unit under mouse cursor (CGameUI + 0x3BC -> +0x244)
+    if (!targetUnit) {
+        DWORD* pUI = (DWORD*)(gameBase + 0xBE6350);
+        if (pUI && *pUI) {
+            DWORD worldFrame = *(DWORD*)(*pUI + 0x3BC);
+            if (worldFrame) {
+                targetUnit = *(DWORD*)(worldFrame + 0x244);
+            }
+        }
+    }
+    return targetUnit;
+}
+
+// -------------------------------------------------------------------------
+// Standalone Modular Action Handlers
+// -------------------------------------------------------------------------
+
+void Cmd_Kill(const std::string& args) {
+    DWORD targetUnit = GetTargetUnit();
+    if (!targetUnit) {
+        ConsoleLog("[HeroAction] No unit selected or hovered under cursor!\n");
+        return;
+    }
+    DWORD gameBase = 0x6F000000;
+    DWORD hpIndex = *(DWORD*)(targetUnit + 0xA0);
+    DWORD thisGame = *(DWORD*)(gameBase + 0xBE40A8);
+    if (thisGame) {
+        DWORD gameMemory = *(DWORD*)(thisGame + 0x0C);
+        if (gameMemory) {
+            DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
+            DWORD address1 = *(DWORD*)entryAddress;
+            if (address1) {
+                float* hpValue = (float*)(address1 + 0x78);
+                *hpValue = 0.0f;
+                ConsoleLog("[HeroAction] Instantly killed target unit!\n");
+            }
+        }
+    }
+}
+
+void Cmd_Heal(const std::string& args) {
+    DWORD targetUnit = GetTargetUnit();
+    if (!targetUnit) {
+        ConsoleLog("[HeroAction] No unit selected or hovered under cursor!\n");
+        return;
+    }
+    DWORD gameBase = 0x6F000000;
+    DWORD hpIndex = *(DWORD*)(targetUnit + 0xA0);
+    DWORD thisGame = *(DWORD*)(gameBase + 0xBE40A8);
+    if (thisGame) {
+        DWORD gameMemory = *(DWORD*)(thisGame + 0x0C);
+        if (gameMemory) {
+            DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
+            DWORD address1 = *(DWORD*)entryAddress;
+            if (address1) {
+                float maxHp = *(float*)(address1 + 0x74);
+                float* hpValue = (float*)(address1 + 0x78);
+                *hpValue = (maxHp > 0.0f) ? maxHp : 999999.0f;
+                ConsoleLog("[HeroAction] Restored target unit HP to maximum!\n");
+            }
+        }
+    }
+}
+
+void Cmd_Teleport(const std::string& args) {
+    DWORD targetUnit = GetTargetUnit();
+    if (!targetUnit) {
+        ConsoleLog("[Teleport] No unit selected or hovered under cursor!\n");
+        return;
+    }
+    HMODULE hPlugin = GetModuleHandleA("War3Plugin.dll");
+    if (!hPlugin) {
+        ConsoleLog("[Teleport] War3Plugin.dll not ready!\n");
+        return;
+    }
+    float mouseX = *(float*)((BYTE*)hPlugin + 0x2656D8);
+    float mouseY = *(float*)((BYTE*)hPlugin + 0x2656DC);
+    if (mouseX == 0.0f && mouseY == 0.0f) {
+        ConsoleLog("[Teleport] Mouse cursor is outside map or terrain coords not ready.\n");
+        return;
+    }
+    DWORD gameBase = 0x6F000000;
+    DWORD fnSetCoord = gameBase + 0x635DE0;
+    __try {
+        __asm {
+            mov ecx, targetUnit
+            push 0
+            push -1
+            push 0
+            push 0
+            push 0
+            push 0
+            push -1
+            push 1
+            push 1
+            lea eax, mouseY
+            push eax
+            lea eax, mouseX
+            push eax
+            call fnSetCoord
+        }
+        char log[128];
+        sprintf_s(log, sizeof(log), "[Teleport] Teleported unit to mouse position: (X: %.1f, Y: %.1f)!\n", mouseX, mouseY);
+        ConsoleLog(log);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        ConsoleLog("[Teleport] Exception caught during CWidget::SetCoord.\n");
+    }
+}
+
+void Cmd_God(const std::string& args) {
+    DWORD targetUnit = GetTargetUnit();
+    if (!targetUnit) {
+        ConsoleLog("[GodMode] No unit selected or hovered under cursor!\n");
+        return;
+    }
+    DWORD gameBase = 0x6F000000;
+    // 1. Call Game.dll CGameState::SetUnitInvulnerable(BOOL flag, CUnit* unit) @ 0x210CB0
+    DWORD pGameWar3 = *(DWORD*)(gameBase + 0xBE4238);
+    if (pGameWar3) {
+        DWORD gameState = *(DWORD*)(pGameWar3 + 0x1C);
+        if (gameState) {
+            typedef void(__thiscall *SetUnitInvul_t)(DWORD thisPtr, BOOL flag, DWORD unit);
+            SetUnitInvul_t fnSetInvul = (SetUnitInvul_t)(gameBase + 0x210CB0);
+            fnSetInvul(gameState, TRUE, targetUnit);
+        }
+    }
+    // 2. Maximize and lock HP to 999,999,999.0f
+    DWORD hpIndex = *(DWORD*)(targetUnit + 0xA0);
+    DWORD thisGame = *(DWORD*)(gameBase + 0xBE40A8);
+    if (thisGame) {
+        DWORD gameMemory = *(DWORD*)(thisGame + 0x0C);
+        if (gameMemory) {
+            DWORD entryAddress = gameMemory + hpIndex * 8 + 4;
+            DWORD address1 = *(DWORD*)entryAddress;
+            if (address1) {
+                float* maxHp = (float*)(address1 + 0x74);
+                float* hpValue = (float*)(address1 + 0x78);
+                *maxHp = 999999999.0f;
+                *hpValue = 999999999.0f;
+            }
+        }
+    }
+    ConsoleLog("[HeroAction] Target unit is now officially INVULNERABLE (God Mode Active)!\n");
+}
+
+void Cmd_AddSP(const std::string& args) {
+    DWORD targetUnit = GetTargetUnit();
+    if (!targetUnit) {
+        ConsoleLog("[HeroAction] No unit selected or hovered under cursor!\n");
+        return;
+    }
+    DWORD heroAbility = *(DWORD*)(targetUnit + 0x1F0);
+    if (!heroAbility) {
+        ConsoleLog("[HeroAction] Target unit is not a Hero (no CAbilityHero at +0x1F0).\n");
+        return;
+    }
+    int amount = atoi(args.c_str());
+    if (amount <= 0) amount = 10;
+    int* pSp = (int*)(heroAbility + 0x90);
+    *pSp += amount;
+    char log[128];
+    sprintf_s(log, sizeof(log), "[HeroAction] Added %d Skill Points! (Total: %d)\n", amount, *pSp);
+    ConsoleLog(log);
+}
+
+void Cmd_AddStats(const std::string& args) {
+    DWORD targetUnit = GetTargetUnit();
+    if (!targetUnit) {
+        ConsoleLog("[HeroAction] No unit selected or hovered under cursor!\n");
+        return;
+    }
+    DWORD heroAbility = *(DWORD*)(targetUnit + 0x1F0);
+    if (!heroAbility) {
+        ConsoleLog("[HeroAction] Target unit is not a Hero (no CAbilityHero at +0x1F0).\n");
+        return;
+    }
+    int amount = atoi(args.c_str());
+    if (amount <= 0) amount = 500;
+    int* pStr = (int*)(heroAbility + 0x94);
+    int* pAgi = (int*)(heroAbility + 0xA8);
+    *pStr += amount;
+    *pAgi += amount;
+    char log[128];
+    sprintf_s(log, sizeof(log), "[HeroAction] Boosted Stats +%d! (STR: %d, AGI: %d)\n", amount, *pStr, *pAgi);
+    ConsoleLog(log);
+}
+
+void Cmd_AddXP(const std::string& args) {
+    DWORD targetUnit = GetTargetUnit();
+    if (!targetUnit) {
+        ConsoleLog("[HeroAction] No unit selected or hovered under cursor!\n");
+        return;
+    }
+    DWORD heroAbility = *(DWORD*)(targetUnit + 0x1F0);
+    if (!heroAbility) {
+        ConsoleLog("[HeroAction] Target unit is not a Hero (no CAbilityHero at +0x1F0).\n");
+        return;
+    }
+    int amount = atoi(args.c_str());
+    if (amount <= 0) amount = 10000;
+    int* pXp = (int*)(heroAbility + 0x8C);
+    *pXp += amount;
+    char log[128];
+    sprintf_s(log, sizeof(log), "[HeroAction] Added %d XP! (Total: %d)\n", amount, *pXp);
+    ConsoleLog(log);
+}
+
+void Cmd_VIP(const std::string& args) {
+    g_PlatformVIP = atoi(args.c_str());
+    char log[128];
+    sprintf_s(log, sizeof(log), "[Control] PlatformVIP changed to: %d\n", g_PlatformVIP);
+    ConsoleLog(log);
+}
+
+void Cmd_Mall(const std::string& args) {
+    g_MallMode = atoi(args.c_str());
+    char log[128];
+    sprintf_s(log, sizeof(log), "[Control] MallMode changed to: %d\n", g_MallMode);
+    ConsoleLog(log);
+}
+
+void Cmd_Percent(const std::string& args) {
+    g_MallPercent = atoi(args.c_str());
+    char log[128];
+    sprintf_s(log, sizeof(log), "[Control] MallPercent changed to: %d%%\n", g_MallPercent);
+    ConsoleLog(log);
+}
+
+void Cmd_Level(const std::string& args) {
+    g_MapLevel = atoi(args.c_str());
+    char log[128];
+    sprintf_s(log, sizeof(log), "[Control] MapLevel changed to: %d\n", g_MapLevel);
+    ConsoleLog(log);
+}
+
+void Cmd_AntiOver(const std::string& args) {
+    g_PreventGameOver = atoi(args.c_str());
+    char log[128];
+    sprintf_s(log, sizeof(log), "[Control] PreventGameOver changed to: %d\n", g_PreventGameOver);
+    ConsoleLog(log);
+}
+
+void Cmd_Gold(const std::string& args) {
+    int amount = atoi(args.c_str());
+    if (amount <= 0) amount = 100000;
+    DWORD gameBase = 0x6F000000;
+    DWORD* pGame = (DWORD*)(gameBase + 0xBE4238);
+    if (pGame && *pGame) {
+        DWORD pGameWar3 = *pGame;
+        DWORD playerId = *(DWORD*)(pGameWar3 + 0x28);
+        if (playerId < 16) {
+            DWORD player = *(DWORD*)(pGameWar3 + 0x58 + playerId * 4);
+            if (player) {
+                DWORD* pGold = (DWORD*)(player + 0x78);
+                *pGold += amount;
+                char log[128];
+                sprintf_s(log, sizeof(log), "[Resources] Added %d Gold! (Current: %u)\n", amount, *pGold);
+                ConsoleLog(log);
+                return;
+            }
+        }
+    }
+    ConsoleLog("[Resources] Error: Player object not found.\n");
+}
+
+void Cmd_Lumber(const std::string& args) {
+    int amount = atoi(args.c_str());
+    if (amount <= 0) amount = 100000;
+    DWORD gameBase = 0x6F000000;
+    DWORD* pGame = (DWORD*)(gameBase + 0xBE4238);
+    if (pGame && *pGame) {
+        DWORD pGameWar3 = *pGame;
+        DWORD playerId = *(DWORD*)(pGameWar3 + 0x28);
+        if (playerId < 16) {
+            DWORD player = *(DWORD*)(pGameWar3 + 0x58 + playerId * 4);
+            if (player) {
+                DWORD* pLumber = (DWORD*)(player + 0x7C);
+                *pLumber += amount;
+                char log[128];
+                sprintf_s(log, sizeof(log), "[Resources] Added %d Lumber! (Current: %u)\n", amount, *pLumber);
+                ConsoleLog(log);
+                return;
+            }
+        }
+    }
+    ConsoleLog("[Resources] Error: Player object not found.\n");
+}
+
+void Cmd_Fog(const std::string& args) {
+    bool enable = (args == "1" || args == "ON" || args == "on");
+    for (int i = 0; i < g_nativeCount; ++i) {
+        if (strcmp(g_natives[i].name, "FogEnable") == 0) {
+            typedef void(__cdecl *FogEnable_t)(BOOL);
+            ((FogEnable_t)g_natives[i].func_ptr)(enable ? TRUE : FALSE);
+        }
+        else if (strcmp(g_natives[i].name, "FogMaskEnable") == 0) {
+            typedef void(__cdecl *FogMaskEnable_t)(BOOL);
+            ((FogMaskEnable_t)g_natives[i].func_ptr)(enable ? TRUE : FALSE);
+        }
+    }
+    char log[128];
+    sprintf_s(log, sizeof(log), "[Map] Fog of War %s!\n", enable ? "Enabled" : "Disabled (Full Vision Active)");
+    ConsoleLog(log);
+}
+
+void Cmd_Speed(const std::string& args) {
+    float speed = (float)atof(args.c_str());
+    if (speed <= 0.0f) speed = 1.0f;
+    for (int i = 0; i < g_nativeCount; ++i) {
+        if (strcmp(g_natives[i].name, "SetGameSpeed") == 0) {
+            typedef void(__cdecl *SetGameSpeed_t)(int);
+            int val = (speed >= 2.0f) ? 4 : 3;
+            ((SetGameSpeed_t)g_natives[i].func_ptr)(val);
+        }
+    }
+    char log[128];
+    sprintf_s(log, sizeof(log), "[GameSpeed] Game Speed adjusted (Factor: %.1fx)\n", speed);
+    ConsoleLog(log);
+}
+
+void Cmd_Save(const std::string& args) {
+    size_t c1 = args.find(':');
+    if (c1 != std::string::npos) {
+        size_t c2 = args.find(':', c1 + 1);
+        if (c2 != std::string::npos) {
+            int player = atoi(args.substr(0, c1).c_str());
+            std::string key = args.substr(c1 + 1, c2 - (c1 + 1));
+            std::string val = args.substr(c2 + 1);
+            
+            DWORD fakeKey = CreateFakeJassString(key.c_str());
+            DWORD fakeVal = CreateFakeJassString(val.c_str());
+            
+            char logBuf[512];
+            sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Sending manual SAVE request -> Player: %d | Key: \"%s\" | Value: \"%s\"\n", 
+                      player, key.c_str(), val.c_str());
+            ConsoleLog(logBuf);
+            
+            int ret = Monitor_SaveServerValue(player, fakeKey, fakeVal);
+            sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Manual SAVE returned: %d\n", ret);
+            ConsoleLog(logBuf);
+            
+            FreeFakeJassString(fakeKey);
+            FreeFakeJassString(fakeVal);
+        }
+    }
+}
+
+void Cmd_Native(const std::string& args) {
+    std::stringstream ss(args);
+    std::string nativeName, arg1, arg2, arg3;
+    std::getline(ss, nativeName, ':');
+    std::getline(ss, arg1, ':');
+    std::getline(ss, arg2, ':');
+    std::getline(ss, arg3, ':');
+    
+    if (nativeName.empty()) return;
+    NativeEntry* found = nullptr;
+    for (int i = 0; i < g_nativeCount; ++i) {
+        if (strcmp(g_natives[i].name, nativeName.c_str()) == 0) {
+            found = &g_natives[i];
+            break;
+        }
+    }
+    
+    if (found) {
+        char logBuf[256];
+        sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Executing Native: %s | Sig: %s\n", found->name, found->sig);
+        ConsoleLog(logBuf);
+        
+        const char* p1 = arg1.empty() ? nullptr : arg1.c_str();
+        const char* p2 = arg2.empty() ? nullptr : arg2.c_str();
+        const char* p3 = arg3.empty() ? nullptr : arg3.c_str();
+        
+        if (strstr(found->sig, "(R") != nullptr) {
+            float val = p1 ? (float)atof(p1) : 0.0f;
+            typedef void(__cdecl *Func1F)(float);
+            ((Func1F)found->func_ptr)(val);
+        }
+        else if (p1 && p2 && p3) {
+            typedef void(__cdecl *Func3I)(int, int, int);
+            ((Func3I)found->func_ptr)(atoi(p1), atoi(p2), atoi(p3));
+        }
+        else if (p1 && p2) {
+            typedef void(__cdecl *Func2I)(int, int);
+            ((Func2I)found->func_ptr)(atoi(p1), atoi(p2));
+        }
+        else if (p1) {
+            typedef void(__cdecl *Func1I)(int);
+            ((Func1I)found->func_ptr)(atoi(p1));
+        }
+        else {
+            typedef void(__cdecl *Func0)();
+            ((Func0)found->func_ptr)();
+        }
+        ConsoleLog("[Invoker] Native executed successfully.\n");
+    } else {
+        char err[128];
+        sprintf_s(err, sizeof(err), "[Invoker] Error: Native '%s' not found!\n", nativeName.c_str());
+        ConsoleLog(err);
+    }
+}
+
+static bool SafeInvokeHandler(CommandHandler handler, const std::string* pArgs) {
+    __try {
+        handler(*pArgs);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void DispatchCommand(const std::string& rawCmd) {
+    if (rawCmd.empty()) return;
+    std::string cmdName;
+    std::string args;
+    size_t colon = rawCmd.find(':');
+    if (colon != std::string::npos) {
+        cmdName = rawCmd.substr(0, colon);
+        args = rawCmd.substr(colon + 1);
+    } else {
+        cmdName = rawCmd;
+    }
+    for (char& c : cmdName) c = (char)toupper(c);
+    
+    auto it = g_commandMap.find(cmdName);
+    if (it != g_commandMap.end()) {
+        if (!SafeInvokeHandler(it->second, &args)) {
+            char err[128];
+            sprintf_s(err, sizeof(err), "[Dispatcher] Exception executing command '%s'!\n", cmdName.c_str());
+            ConsoleLog(err);
+        }
+    } else {
+        char err[128];
+        sprintf_s(err, sizeof(err), "[Dispatcher] Unregistered command: '%s'\n", cmdName.c_str());
+        ConsoleLog(err);
+    }
+}
+
+void InitCommandRegistry() {
+    RegisterCommand("KILL", Cmd_Kill);
+    RegisterCommand("HEAL", Cmd_Heal);
+    RegisterCommand("TELEPORT", Cmd_Teleport);
+    RegisterCommand("BLINK", Cmd_Teleport);
+    RegisterCommand("GOD", Cmd_God);
+    RegisterCommand("INVUL", Cmd_God);
+    RegisterCommand("ADD_SP", Cmd_AddSP);
+    RegisterCommand("ADD_STATS", Cmd_AddStats);
+    RegisterCommand("ADD_XP", Cmd_AddXP);
+    RegisterCommand("VIP", Cmd_VIP);
+    RegisterCommand("MALL", Cmd_Mall);
+    RegisterCommand("PERCENT", Cmd_Percent);
+    RegisterCommand("LEVEL", Cmd_Level);
+    RegisterCommand("ANTIOVER", Cmd_AntiOver);
+    RegisterCommand("GOLD", Cmd_Gold);
+    RegisterCommand("LUMBER", Cmd_Lumber);
+    RegisterCommand("FOG", Cmd_Fog);
+    RegisterCommand("SPEED", Cmd_Speed);
+    RegisterCommand("SAVE", Cmd_Save);
+    RegisterCommand("NATIVE", Cmd_Native);
+    ConsoleLog("[Dispatcher] Command Registry initialized (20 plug-and-play actions registered).\n");
 }
 
 // -- Main Thread Execution via WndProc Hook --
@@ -781,98 +1085,38 @@ LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
     if (uMsg == WM_KEYDOWN) {
         bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         if (ctrlDown) {
-            if (wParam == 'M') {
-                HandleHeroAction(6, 0); // Ctrl+M: Teleport to mouse
-                return 0;
-            }
-            else if (wParam == 'G') {
-                HandleHeroAction(7, 0); // Ctrl+G: God Mode (Invulnerable)
-                return 0;
-            }
-            else if (wParam == 'H') {
-                HandleHeroAction(2, 0); // Ctrl+H: Heal
-                return 0;
-            }
-            else if (wParam == 'K') {
-                HandleHeroAction(1, 0); // Ctrl+K: Kill
-                return 0;
-            }
+            if (wParam == 'M') { DispatchCommand("TELEPORT"); return 0; }
+            if (wParam == 'G') { DispatchCommand("GOD"); return 0; }
+            if (wParam == 'H') { DispatchCommand("HEAL"); return 0; }
+            if (wParam == 'K') { DispatchCommand("KILL"); return 0; }
         }
     }
 
+    if (uMsg == WM_APP + 5) {
+        std::string* pCmd = (std::string*)lParam;
+        if (pCmd) {
+            DispatchCommand(*pCmd);
+            delete pCmd;
+        }
+        return 0;
+    }
+
+    // Backwards compatibility for legacy messages
     if (uMsg == WM_APP + 2) {
-        HandleHeroAction(1, 0); // Kill
+        DispatchCommand("KILL");
         return 0;
     }
-    
     if (uMsg == WM_APP + 4) {
-        HandleHeroAction((int)wParam, (int)lParam);
+        int act = (int)wParam;
+        int p = (int)lParam;
+        if (act == 1) DispatchCommand("KILL");
+        else if (act == 2) DispatchCommand("HEAL");
+        else if (act == 3) DispatchCommand("ADD_SP:" + std::to_string(p));
+        else if (act == 4) DispatchCommand("ADD_STATS:" + std::to_string(p));
+        else if (act == 5) DispatchCommand("ADD_XP:" + std::to_string(p));
+        else if (act == 6) DispatchCommand("TELEPORT");
+        else if (act == 7) DispatchCommand("GOD");
         return 0;
-    }
-
-
-    
-    if (uMsg == WM_APP + 3) {
-        SaveData* sd = (SaveData*)lParam;
-        DWORD fakeKey = CreateFakeJassString(sd->key);
-        DWORD fakeVal = CreateFakeJassString(sd->val);
-        
-        char logBuf[512];
-        sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Sending manual SAVE request -> Player: %d | Key: \"%s\" | Value: \"%s\"\n", 
-                  sd->player, sd->key, sd->val);
-        ConsoleLog(logBuf);
-        
-        int ret = Monitor_SaveServerValue(sd->player, fakeKey, fakeVal);
-        sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Manual SAVE returned: %d\n", ret);
-        ConsoleLog(logBuf);
-        
-        FreeFakeJassString(fakeKey);
-        FreeFakeJassString(fakeVal);
-        delete sd;
-        return 0;
-    }
-    
-    if (uMsg == WM_APP + 1) {
-        InvokeData* data = (InvokeData*)lParam;
-        char logBuf[256];
-        void* func_ptr = data->func_ptr;
-        const char* sig = data->sig;
-        
-        if (strstr(sig, "(R") != nullptr) {
-            float val = data->arg1 ? (float)atof(data->arg1) : 0.0f;
-            typedef void(__cdecl *Func1F)(float);
-            ((Func1F)func_ptr)(val);
-            sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Execution Success (Float Arg: %f).\n", val);
-        }
-        else if (data->arg1 && data->arg2 && data->arg3) {
-            int v1 = atoi(data->arg1);
-            int v2 = atoi(data->arg2);
-            int v3 = atoi(data->arg3);
-            typedef void(__cdecl *Func3I)(int, int, int);
-            ((Func3I)func_ptr)(v1, v2, v3);
-            sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Execution Success (Args: %d, %d, %d).\n", v1, v2, v3);
-        }
-        else if (data->arg1 && data->arg2) {
-            int v1 = atoi(data->arg1);
-            int v2 = atoi(data->arg2);
-            typedef void(__cdecl *Func2I)(int, int);
-            ((Func2I)func_ptr)(v1, v2);
-            sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Execution Success (Args: %d, %d).\n", v1, v2);
-        }
-        else if (data->arg1) {
-            int v1 = atoi(data->arg1);
-            typedef void(__cdecl *Func1I)(int);
-            ((Func1I)func_ptr)(v1);
-            sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Execution Success (Arg: %d).\n", v1);
-        }
-        else {
-            typedef void(__cdecl *Func0)();
-            ((Func0)func_ptr)();
-            sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Execution Success (0 Args).\n");
-        }
-        
-        ConsoleLog(logBuf);
-        return 0; // Handled
     }
     
     if (OriginalWndProc) {
@@ -881,7 +1125,7 @@ LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
     return DefWindowProcA(hWnd, uMsg, wParam, lParam);
 }
 
-// Pipe Thread
+// Pipe Thread (Ultra-lightweight forwarder to Game Thread Dispatcher)
 DWORD WINAPI PipeServerThread(LPVOID lpParam) {
     while (true) {
         HANDLE hPipe = CreateNamedPipeA(
@@ -918,136 +1162,12 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam) {
                 }
                 buffer[bytesRead] = '\0';
                 
-                if (strncmp(buffer, "KILL", 4) == 0) {
-                    if (g_gameHwnd) {
-                        SendMessageA(g_gameHwnd, WM_APP + 4, 1, 0); // Action 1 = Kill
-                    }
-                }
-                else if (strncmp(buffer, "HEAL", 4) == 0) {
-                    if (g_gameHwnd) {
-                        SendMessageA(g_gameHwnd, WM_APP + 4, 2, 0); // Action 2 = Heal (Full HP)
-                    }
-                }
-                else if (strncmp(buffer, "TELEPORT", 8) == 0 || strncmp(buffer, "BLINK", 5) == 0) {
-                    if (g_gameHwnd) {
-                        SendMessageA(g_gameHwnd, WM_APP + 4, 6, 0); // Action 6 = Teleport to mouse
-                    }
-                }
-                else if (strncmp(buffer, "GOD", 3) == 0 || strncmp(buffer, "INVUL", 5) == 0) {
-                    if (g_gameHwnd) {
-                        SendMessageA(g_gameHwnd, WM_APP + 4, 7, 0); // Action 7 = Invulnerable (God Mode)
-                    }
-                }
-                else if (strncmp(buffer, "ADD_SP:", 7) == 0) {
-                    int amount = atoi(buffer + 7);
-                    if (amount <= 0) amount = 10;
-                    if (g_gameHwnd) {
-                        SendMessageA(g_gameHwnd, WM_APP + 4, 3, (LPARAM)amount); // Action 3 = Add SP
-                    }
-                }
-                else if (strncmp(buffer, "ADD_STATS:", 10) == 0) {
-                    int amount = atoi(buffer + 10);
-                    if (amount <= 0) amount = 500;
-                    if (g_gameHwnd) {
-                        SendMessageA(g_gameHwnd, WM_APP + 4, 4, (LPARAM)amount); // Action 4 = Add Stats
-                    }
-                }
-                else if (strncmp(buffer, "ADD_XP:", 7) == 0) {
-                    int amount = atoi(buffer + 7);
-                    if (amount <= 0) amount = 10000;
-                    if (g_gameHwnd) {
-                        SendMessageA(g_gameHwnd, WM_APP + 4, 5, (LPARAM)amount); // Action 5 = Add XP
-                    }
-                }
-                else if (strncmp(buffer, "VIP:", 4) == 0) {
-                    g_PlatformVIP = atoi(buffer + 4);
-                    char log[128];
-                    sprintf_s(log, sizeof(log), "[Control] PlatformVIP changed to: %d\n", g_PlatformVIP);
-                    ConsoleLog(log);
-                }
-                else if (strncmp(buffer, "SAVE:", 5) == 0) {
-                    char* p1 = strchr(buffer, ':');
-                    if (p1) {
-                        char* p2 = strchr(p1 + 1, ':');
-                        if (p2) {
-                            char* p3 = strchr(p2 + 1, ':');
-                            if (p3 && g_gameHwnd) {
-                                *p2 = '\0';
-                                *p3 = '\0';
-                                char* pStr = p1 + 1;
-                                char* kStr = p2 + 1;
-                                char* vStr = p3 + 1;
-                                SaveData* sd = new SaveData();
-                                sd->player = atoi(pStr);
-                                strncpy_s(sd->key, sizeof(sd->key), kStr, _TRUNCATE);
-                                strncpy_s(sd->val, sizeof(sd->val), vStr, _TRUNCATE);
-                                SendMessageA(g_gameHwnd, WM_APP + 3, 0, (LPARAM)sd);
-                            }
-                        }
-                    }
-                }
-                else if (strncmp(buffer, "MALL:", 5) == 0) {
-                    g_MallMode = atoi(buffer + 5);
-                    char log[128];
-                    sprintf_s(log, sizeof(log), "[Control] MallMode changed to: %d\n", g_MallMode);
-                    ConsoleLog(log);
-                }
-                else if (strncmp(buffer, "PERCENT:", 8) == 0) {
-                    g_MallPercent = atoi(buffer + 8);
-                    char log[128];
-                    sprintf_s(log, sizeof(log), "[Control] MallPercent changed to: %d%%\n", g_MallPercent);
-                    ConsoleLog(log);
-                }
-                else if (strncmp(buffer, "LEVEL:", 6) == 0) {
-                    g_MapLevel = atoi(buffer + 6);
-                    char log[128];
-                    sprintf_s(log, sizeof(log), "[Control] MapLevel changed to: %d\n", g_MapLevel);
-                    ConsoleLog(log);
-                }
-                else if (strncmp(buffer, "ANTIOVER:", 9) == 0) {
-                    g_PreventGameOver = atoi(buffer + 9);
-                    char log[128];
-                    sprintf_s(log, sizeof(log), "[Control] PreventGameOver changed to: %d\n", g_PreventGameOver);
-                    ConsoleLog(log);
-                }
-                else if (strncmp(buffer, "NATIVE:", 7) == 0) {
-                    char* ctx = nullptr;
-                    char* nativeTag = strtok_s(buffer, ":", &ctx);
-                    char* nativeName = strtok_s(nullptr, ":", &ctx);
-                    char* arg1Str = strtok_s(nullptr, ":", &ctx);
-                    char* arg2Str = strtok_s(nullptr, ":", &ctx);
-                    char* arg3Str = strtok_s(nullptr, ":", &ctx);
-                    
-                    if (nativeName) {
-                        NativeEntry* found = nullptr;
-                        for (int i = 0; i < g_nativeCount; ++i) {
-                            if (strcmp(g_natives[i].name, nativeName) == 0) {
-                                found = &g_natives[i];
-                                break;
-                            }
-                        }
-                        
-                        char logBuf[256];
-                        if (found) {
-                            sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Requesting Execution: %s | Sig: %s\n", found->name, found->sig);
-                            ConsoleLog(logBuf);
-                            
-                            if (g_gameHwnd) {
-                                InvokeData data;
-                                data.func_ptr = found->func_ptr; // Points to original function, will trigger thunk if hooked
-                                data.sig = found->sig;
-                                data.arg1 = arg1Str;
-                                data.arg2 = arg2Str;
-                                data.arg3 = arg3Str;
-                                SendMessageA(g_gameHwnd, WM_APP + 1, 0, (LPARAM)&data);
-                            } else {
-                                ConsoleLog("[Invoker] Error: Game HWND not found!\n");
-                            }
-                        } else {
-                            sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Error: Native '%s' not found in Registry!\n", nativeName);
-                            ConsoleLog(logBuf);
-                        }
-                    }
+                // Forward command to Game Thread Dispatcher
+                if (g_gameHwnd) {
+                    std::string* pCmd = new std::string(buffer);
+                    SendMessageA(g_gameHwnd, WM_APP + 5, 0, (LPARAM)pCmd);
+                } else {
+                    DispatchCommand(buffer);
                 }
             }
             g_activePipe = INVALID_HANDLE_VALUE;
@@ -1202,6 +1322,8 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
         InstallTrampolineHook("DzPlatform_GameEnd", (void*)Monitor_DzPlatform_GameEnd, hkGameEnd);
         ConsoleLog("----------------------------------------\n");
     }
+
+    InitCommandRegistry();
 
     EnumData edata = { GetCurrentProcessId(), NULL };
     EnumWindows(EnumWindowsProc, (LPARAM)&edata);
