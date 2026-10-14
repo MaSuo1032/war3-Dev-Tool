@@ -35,9 +35,7 @@ HANDLE g_activePipe = INVALID_HANDLE_VALUE;
 
 int g_MallMode = 2;         // 0=Off, 1=Whitelist, 2=All, 3=Percent
 int g_MallPercent = 80;     // Default 80%
-int g_MapLevel = 99;        // Map Level spoof
-int g_PlatformVIP = 2;      // 0=Off, 1=Normal, 2=Super VIP
-int g_PreventGameOver = 1;  // Prevent defeat
+int g_MapLevel = 50;        // Map Level spoof
 
 void ConsoleLog(const char* msg) {
     OutputDebugStringA(msg);
@@ -74,7 +72,7 @@ void SaveConfigValue(const wchar_t* key, int value) {
 }
 
 // ==========================================
-// Mall Whitelist & Blacklist (Honeypot Trap Protection)
+// Mall Whitelist & Blacklist
 // ==========================================
 std::unordered_set<std::string> g_mallWhitelist;
 std::unordered_set<std::string> g_mallBlacklist;
@@ -102,7 +100,7 @@ void LoadMallWhitelist() {
 
 void LoadMallBlacklist() {
     g_mallBlacklist.clear();
-    // Pre-seed known anti-cheat honeypot traps
+    // Built-in trap / honeypots
     g_mallBlacklist.insert("cheat");
     g_mallBlacklist.insert("test");
     g_mallBlacklist.insert("trap");
@@ -163,9 +161,9 @@ bool IsTrapHoneypot(const char* keyStr) {
 struct InvokeData {
     void* func_ptr;
     const char* sig;
-    char* arg1;
-    char* arg2;
-    char* arg3;
+    const char* arg1;
+    const char* arg2;
+    const char* arg3;
 };
 
 // ==========================================
@@ -250,7 +248,7 @@ void* CreateThunk(int index, void* original_func) {
 }
 
 // ==========================================
-// Trampoline Hook Engine
+// Trampoline Hooks (Proven & Working)
 // ==========================================
 struct HookData {
     void* targetPtr = nullptr;
@@ -262,7 +260,6 @@ HookData hkHasMallItem;
 HookData hkSave;
 HookData hkGet;
 HookData hkSetStat;
-HookData hkGameEnd;
 
 void RemoveTrampoline(HookData& data) {
     if (!data.isHooked || !data.targetPtr) return;
@@ -307,11 +304,11 @@ void InstallTrampolineHook(const char* nativeName, void* hookFunc, HookData& out
         outData.isHooked = true;
         
         char log[256];
-        sprintf_s(log, sizeof(log), "[Trampoline] Hooked %s -> Success!\n", nativeName);
+        sprintf_s(log, sizeof(log), "[Monitor] Hooked %s -> Success!\n", nativeName);
         ConsoleLog(log);
     } else {
         char log[256];
-        sprintf_s(log, sizeof(log), "[Trampoline] Failed to hook %s (Not found)\n", nativeName);
+        sprintf_s(log, sizeof(log), "[Monitor] Failed to hook %s (Not found)\n", nativeName);
         ConsoleLog(log);
     }
 }
@@ -325,16 +322,16 @@ int __cdecl Monitor_SaveServerValue(int player, DWORD key_ptr, DWORD value_ptr) 
     const char* valStr = "(null)";
     
     __try {
-        if (key_ptr > 0x10000) {
+        if (key_ptr > 0x10000 && key_ptr < 0x7FFFFFFF) {
             DWORD stringData = *(DWORD*)(key_ptr + 8);
-            if (stringData > 0x10000) {
+            if (stringData > 0x10000 && stringData < 0x7FFFFFFF) {
                 char* chars = *(char**)(stringData + 0x1C);
                 if (chars) keyStr = chars;
             }
         }
-        if (value_ptr > 0x10000) {
+        if (value_ptr > 0x10000 && value_ptr < 0x7FFFFFFF) {
             DWORD stringData = *(DWORD*)(value_ptr + 8);
-            if (stringData > 0x10000) {
+            if (stringData > 0x10000 && stringData < 0x7FFFFFFF) {
                 char* chars = *(char**)(stringData + 0x1C);
                 if (chars) valStr = chars;
             }
@@ -365,16 +362,16 @@ void __cdecl Monitor_Stat_SetStat(int player, DWORD key_ptr, DWORD value_ptr) {
     const char* valStr = "(null)";
     
     __try {
-        if (key_ptr > 0x10000) {
+        if (key_ptr > 0x10000 && key_ptr < 0x7FFFFFFF) {
             DWORD stringData = *(DWORD*)(key_ptr + 8);
-            if (stringData > 0x10000) {
+            if (stringData > 0x10000 && stringData < 0x7FFFFFFF) {
                 char* chars = *(char**)(stringData + 0x1C);
                 if (chars) keyStr = chars;
             }
         }
-        if (value_ptr > 0x10000) {
+        if (value_ptr > 0x10000 && value_ptr < 0x7FFFFFFF) {
             DWORD stringData = *(DWORD*)(value_ptr + 8);
-            if (stringData > 0x10000) {
+            if (stringData > 0x10000 && stringData < 0x7FFFFFFF) {
                 char* chars = *(char**)(stringData + 0x1C);
                 if (chars) valStr = chars;
             }
@@ -401,9 +398,9 @@ void __cdecl Monitor_Stat_SetStat(int player, DWORD key_ptr, DWORD value_ptr) {
 DWORD __cdecl Monitor_GetServerValue(int player, DWORD key_ptr) {
     const char* keyStr = "(null)";
     __try {
-        if (key_ptr > 0x10000) {
+        if (key_ptr > 0x10000 && key_ptr < 0x7FFFFFFF) {
             DWORD stringData = *(DWORD*)(key_ptr + 8);
-            if (stringData > 0x10000) {
+            if (stringData > 0x10000 && stringData < 0x7FFFFFFF) {
                 char* chars = *(char**)(stringData + 0x1C);
                 if (chars) keyStr = chars;
             }
@@ -418,15 +415,15 @@ DWORD __cdecl Monitor_GetServerValue(int player, DWORD key_ptr) {
     const char* valStr = "(null/empty)";
     char idBuf[64];
     __try {
-        if (result > 0x10000) {
+        if (result > 0x10000 && result < 0x7FFFFFFF) {
             DWORD stringData = *(DWORD*)(result + 8);
-            if (stringData > 0x10000) {
+            if (stringData > 0x10000 && stringData < 0x7FFFFFFF) {
                 char* chars = *(char**)(stringData + 0x1C);
-                if (chars && (DWORD)chars > 0x10000) {
+                if (chars && (DWORD)chars > 0x10000 && (DWORD)chars < 0x7FFFFFFF) {
                     valStr = chars;
                 }
             }
-        } else if (result > 0) {
+        } else if (result > 0 && result <= 0x10000) {
             sprintf_s(idBuf, sizeof(idBuf), "<StringID: %u>", result);
             valStr = idBuf;
         }
@@ -454,11 +451,11 @@ DWORD __cdecl Monitor_GetServerValue(int player, DWORD key_ptr) {
 
 const char* SafeReadJassString(DWORD key_ptr) {
     __try {
-        if (key_ptr > 0x10000) {
+        if (key_ptr > 0x10000 && key_ptr < 0x7FFFFFFF) {
             DWORD stringData = *(DWORD*)(key_ptr + 8);
-            if (stringData > 0x10000) {
+            if (stringData > 0x10000 && stringData < 0x7FFFFFFF) {
                 char* chars = *(char**)(stringData + 0x1C);
-                if (chars) return chars;
+                if (chars && (DWORD)chars > 0x10000 && (DWORD)chars < 0x7FFFFFFF) return chars;
             }
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
@@ -474,7 +471,7 @@ int __cdecl Monitor_HasMallItem(int player, DWORD key_ptr) {
     int originalResult = ((FuncType)hkHasMallItem.targetPtr)(player, key_ptr);
     RestoreTrampoline(hkHasMallItem, (void*)Monitor_HasMallItem);
 
-    // 1. Trap / Honeypot Blacklist check (Prevents save loading failure)
+    // 1. Trap / Honeypot Blacklist check
     if (IsTrapHoneypot(keyStr)) {
         char log[256];
         sprintf_s(log, sizeof(log), "[Trap Neutralized] Item \"%s\" is Honeypot/Trap! Spoofed to 0 (Denied).\n", keyStr ? keyStr : "(null)");
@@ -526,27 +523,8 @@ int __cdecl Monitor_HasMallItem(int player, DWORD key_ptr) {
     return finalResult;
 }
 
-void __cdecl Monitor_DzPlatform_GameEnd(DWORD player, DWORD result) {
-    if (g_PreventGameOver > 0) {
-        char log[256];
-        sprintf_s(log, sizeof(log), "[AntiDefeat] BLOCKED DzPlatform_GameEnd(player: %u, result: %u)! Prevented map defeat.\n", player, result);
-        ConsoleLog(log);
-        return;
-    }
-    RemoveTrampoline(hkGameEnd);
-    typedef void(__cdecl *FuncType)(DWORD, DWORD);
-    if (hkGameEnd.targetPtr) {
-        ((FuncType)hkGameEnd.targetPtr)(player, result);
-    }
-    RestoreTrampoline(hkGameEnd, (void*)Monitor_DzPlatform_GameEnd);
-}
-
 int __cdecl Spoof_True() {
     return 1;
-}
-
-int __cdecl Spoof_PlatformVIP(int player) {
-    return g_PlatformVIP;
 }
 
 int __cdecl Spoof_LevelDynamic() {
@@ -582,7 +560,7 @@ void InstallSpoofHook(const char* nativeName, void* spoofFunc) {
 }
 
 // ==========================================
-// Fake JassString Generator for Native Invoker
+// Fake JassString Generator
 // ==========================================
 struct FakeJassStringData {
     char pad[0x1C];
@@ -677,7 +655,6 @@ LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
             ConsoleLog(logBuf);
             
             Monitor_SaveServerValue(sd->player, fakeKey, fakeVal);
-            delete sd;
         }
         return 0;
     }
@@ -723,10 +700,6 @@ LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
             }
             
             ConsoleLog(logBuf);
-            if (data->arg1) free(data->arg1);
-            if (data->arg2) free(data->arg2);
-            if (data->arg3) free(data->arg3);
-            delete data;
         }
         return 0;
     }
@@ -757,11 +730,11 @@ void ProcessSingleCommand(const std::string& cmd) {
         char* kStr = strtok_s(nullptr, ":", &ctx);
         char* vStr = strtok_s(nullptr, ":", &ctx);
         if (pStr && kStr && vStr && g_gameHwnd) {
-            SaveData* sd = new SaveData();
-            sd->player = atoi(pStr);
-            strncpy_s(sd->key, kStr, sizeof(sd->key));
-            strncpy_s(sd->val, vStr, sizeof(sd->val));
-            SendMessageA(g_gameHwnd, WM_APP + 3, 0, (LPARAM)sd);
+            SaveData sd;
+            sd.player = atoi(pStr);
+            strncpy_s(sd.key, kStr, sizeof(sd.key));
+            strncpy_s(sd.val, vStr, sizeof(sd.val));
+            SendMessageA(g_gameHwnd, WM_APP + 3, 0, (LPARAM)&sd);
         }
     }
     else if (cmd.rfind("MALL:", 0) == 0) {
@@ -812,13 +785,13 @@ void ProcessSingleCommand(const std::string& cmd) {
                 ConsoleLog(logBuf);
                 
                 if (g_gameHwnd) {
-                    InvokeData* data = new InvokeData();
-                    data->func_ptr = found->func_ptr;
-                    data->sig = found->sig;
-                    data->arg1 = arg1Str ? _strdup(arg1Str) : nullptr;
-                    data->arg2 = arg2Str ? _strdup(arg2Str) : nullptr;
-                    data->arg3 = arg3Str ? _strdup(arg3Str) : nullptr;
-                    SendMessageA(g_gameHwnd, WM_APP + 1, 0, (LPARAM)data);
+                    InvokeData data;
+                    data.func_ptr = found->func_ptr;
+                    data.sig = found->sig;
+                    data.arg1 = arg1Str;
+                    data.arg2 = arg2Str;
+                    data.arg3 = arg3Str;
+                    SendMessageA(g_gameHwnd, WM_APP + 1, 0, (LPARAM)&data);
                 } else {
                     ConsoleLog("[Invoker] Error: Game HWND not found!\n");
                 }
@@ -826,29 +799,6 @@ void ProcessSingleCommand(const std::string& cmd) {
                 sprintf_s(logBuf, sizeof(logBuf), "[Invoker] Error: Native '%s' not found in Registry!\n", nativeName);
                 ConsoleLog(logBuf);
             }
-        }
-    }
-    else {
-        // Fallback: check if it matches a native name with no arguments
-        NativeEntry* found = nullptr;
-        for (int i = 0; i < g_nativeCount; ++i) {
-            if (strcmp(g_natives[i].name, cmd.c_str()) == 0) {
-                found = &g_natives[i];
-                break;
-            }
-        }
-        if (found && g_gameHwnd) {
-            InvokeData* data = new InvokeData();
-            data->func_ptr = found->func_ptr;
-            data->sig = found->sig;
-            data->arg1 = nullptr;
-            data->arg2 = nullptr;
-            data->arg3 = nullptr;
-            SendMessageA(g_gameHwnd, WM_APP + 1, 0, (LPARAM)data);
-        } else {
-            char logBuf[256];
-            sprintf_s(logBuf, sizeof(logBuf), "[Pipe] Received unhandled command: %s\n", cmd.c_str());
-            ConsoleLog(logBuf);
         }
     }
 }
@@ -964,11 +914,8 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     GetWindowThreadProcessId(hwnd, &pid);
     if (pid == data->processId) {
         char className[256];
-        char title[256];
         GetClassNameA(hwnd, className, sizeof(className));
-        GetWindowTextA(hwnd, title, sizeof(title));
-        if (strcmp(className, "Warcraft III") == 0 || strcmp(className, "OsWindow") == 0 || 
-            strstr(className, "Warcraft") != NULL || strstr(title, "Warcraft") != NULL) {
+        if (strcmp(className, "Warcraft III") == 0 || strcmp(className, "OsWindow") == 0 || strstr(className, "Warcraft") != NULL) {
             data->hWnd = hwnd;
             return FALSE;
         }
@@ -1018,13 +965,11 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
         
         g_MallMode = GetPrivateProfileIntW(L"Spoof", L"MallMode", 2, iniPathW);
         g_MallPercent = GetPrivateProfileIntW(L"Spoof", L"MallPercent", 80, iniPathW);
-        g_MapLevel = GetPrivateProfileIntW(L"Spoof", L"MapLevel", 99, iniPathW);
-        g_PreventGameOver = GetPrivateProfileIntW(L"Spoof", L"PreventGameOver", 1, iniPathW);
-        g_PlatformVIP = GetPrivateProfileIntW(L"Spoof", L"PlatformVIP", 2, iniPathW);
+        g_MapLevel = GetPrivateProfileIntW(L"Spoof", L"MapLevel", 50, iniPathW);
         
         char cfgLog[256];
-        sprintf_s(cfgLog, sizeof(cfgLog), "  -> MallMode: %d (0=Off, 1=Whitelist, 2=All, 3=Percent)\n  -> MallPercent: %d%%\n  -> MapLevel: %d\n  -> PreventGameOver: %d\n  -> PlatformVIP: %d\n", 
-                  g_MallMode, g_MallPercent, g_MapLevel, g_PreventGameOver, g_PlatformVIP);
+        sprintf_s(cfgLog, sizeof(cfgLog), "  -> MallMode: %d (0=Off, 1=Whitelist, 2=All, 3=Percent)\n  -> MallPercent: %d%%\n  -> MapLevel: %d\n", 
+                  g_MallMode, g_MallPercent, g_MapLevel);
         ConsoleLog(cfgLog);
 
         LoadMallWhitelist();
@@ -1033,33 +978,19 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
         ConsoleLog("[Spoofer] Applying VIP / Mall / Level Spoofs...\n");
         if (g_MallMode > 0) {
             InstallSpoofHook("DzAPI_Map_IsVIP", (void*)Spoof_True);
-            InstallSpoofHook("DzAPI_Map_GetPlatformVIP", (void*)Spoof_PlatformVIP);
-            InstallSpoofHook("DzAPI_Map_IsRedVIP", (void*)Spoof_True);
-            InstallSpoofHook("DzAPI_Map_IsBlueVIP", (void*)Spoof_True);
-            // Note: DzAPI_Map_GetServerArchiveEquip and DzAPI_Map_GetServerArchiveDrop
-            // are platform save archives, NOT mall items. Never hook them!
         }
         InstallSpoofHook("DzAPI_Map_GetMapLevel", (void*)Spoof_LevelDynamic);
-        InstallSpoofHook("DzAPI_Map_GetLadderLevel", (void*)Spoof_LevelDynamic);
-        InstallSpoofHook("DzAPI_Map_GetLadderRank", (void*)Spoof_True);
-        InstallSpoofHook("DzAPI_Map_GetMapLevelRank", (void*)Spoof_True);
         
         ConsoleLog("[Spoofer] Applying ServerValue & MallItem Spoofer/Dumper...\n");
         InstallTrampolineHook("DzAPI_Map_HasMallItem", (void*)Monitor_HasMallItem, hkHasMallItem);
         InstallTrampolineHook("DzAPI_Map_SaveServerValue", (void*)Monitor_SaveServerValue, hkSave);
         InstallTrampolineHook("DzAPI_Map_GetServerValue", (void*)Monitor_GetServerValue, hkGet);
         InstallTrampolineHook("DzAPI_Map_Stat_SetStat", (void*)Monitor_Stat_SetStat, hkSetStat);
-        InstallTrampolineHook("DzPlatform_GameEnd", (void*)Monitor_DzPlatform_GameEnd, hkGameEnd);
         ConsoleLog("----------------------------------------\n");
     }
 
     EnumData edata = { GetCurrentProcessId(), NULL };
-    for (int retry = 0; retry < 40 && !edata.hWnd; ++retry) {
-        EnumWindows(EnumWindowsProc, (LPARAM)&edata);
-        if (!edata.hWnd) {
-            Sleep(500);
-        }
-    }
+    EnumWindows(EnumWindowsProc, (LPARAM)&edata);
     if (edata.hWnd) {
         g_gameHwnd = edata.hWnd;
         OriginalWndProc = (WNDPROC)SetWindowLongA(edata.hWnd, GWL_WNDPROC, (LONG)(LONG_PTR)HookedWndProc);
@@ -1067,7 +998,7 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
         sprintf_s(log, sizeof(log), "[JassHook] Game window found (0x%p) and WndProc hooked successfully. E2E system ready!\n", g_gameHwnd);
         ConsoleLog(log);
     } else {
-        ConsoleLog("[JassHook] Warning: Could not find game window to hook WndProc. Commands will run in fallback mode.\n");
+        ConsoleLog("[JassHook] Error: Could not find game window to hook WndProc.\n");
     }
 
     CreateThread(NULL, 0, PipeServerThread, NULL, 0, NULL);
