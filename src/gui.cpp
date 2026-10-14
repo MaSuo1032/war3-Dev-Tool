@@ -43,6 +43,9 @@
 #define IDC_EDIT_KEY              1025
 #define IDC_EDIT_VAL              1026
 #define IDC_BTN_SAVE_SINGLE       1027
+#define IDC_EDIT_QUICKSAVE        1028
+#define IDC_BTN_QUICKSAVE         1029
+#define IDC_BTN_PASTE_SAVE        1034
 
 #define IDC_GRP_CMD               1030
 #define IDC_BTN_KILL              1031
@@ -56,7 +59,15 @@
 #define IDC_BTN_COPY_LOG          1044
 #define IDC_BTN_OPEN_TRACE        1045
 
+#define IDC_TAB_MONITOR           1050
+#define IDC_LIST_SAVE_MONITOR     1051
+#define IDC_BTN_COPY_SAVE_ITEM    1052
+#define IDC_BTN_FILL_SAVE_INPUT   1053
+#define IDC_BTN_CLEAR_SAVE_LIST   1054
+#define IDC_BTN_RELOAD_SAVE       1055
+
 #define IDT_TIMER_STATUS          1
+#define WM_USER_UPDATE_SAVE_LIST  (WM_USER + 101)
 
 // Global GUI Handles
 HWND g_hWnd = NULL;
@@ -70,9 +81,20 @@ HWND g_hEditPercent = NULL;
 HWND g_hEditPid = NULL;
 HWND g_hEditKey = NULL;
 HWND g_hEditVal = NULL;
+HWND g_hEditQuickSave = NULL;
 HWND g_hEditCmd = NULL;
 HWND g_hEditLog = NULL;
 HWND g_hChkAutoScroll = NULL;
+
+HWND g_hTabMonitor = NULL;
+HWND g_hListSaveMonitor = NULL;
+HWND g_hBtnCopySaveItem = NULL;
+HWND g_hBtnFillSaveInput = NULL;
+HWND g_hBtnClearSaveList = NULL;
+HWND g_hBtnReloadSave = NULL;
+HWND g_hBtnClearLog = NULL;
+HWND g_hBtnCopyLog = NULL;
+HWND g_hBtnOpenTrace = NULL;
 
 HFONT g_hFont = NULL;
 HFONT g_hFontBold = NULL;
@@ -81,6 +103,7 @@ HBRUSH g_hLogBrush = NULL;
 
 WNDPROC g_oldEditCmdProc = NULL;
 WNDPROC g_oldEditPercentProc = NULL;
+WNDPROC g_oldEditQuickSaveProc = NULL;
 
 HANDLE g_hPipe = INVALID_HANDLE_VALUE;
 CRITICAL_SECTION g_pipeCs;
@@ -88,6 +111,57 @@ CRITICAL_SECTION g_pipeCs;
 DWORD g_lastDetectedPid = 0;
 bool g_isDllInjected = false;
 bool g_updatingSlider = false;
+inline void ListView_GetItemTextW_Helper(HWND hwnd, int iItem, int iSubItem, LPWSTR pszText, int cchTextMax) {
+    LVITEMW lvi{};
+    lvi.iSubItem = iSubItem;
+    lvi.cchTextMax = cchTextMax;
+    lvi.pszText = pszText;
+    SendMessageW(hwnd, LVM_GETITEMTEXTW, (WPARAM)iItem, (LPARAM)&lvi);
+}
+
+inline void ListView_SetItemTextW_Helper(HWND hwnd, int iItem, int iSubItem, LPCWSTR pszText) {
+    LVITEMW lvi{};
+    lvi.iSubItem = iSubItem;
+    lvi.pszText = (LPWSTR)pszText;
+    SendMessageW(hwnd, LVM_SETITEMTEXTW, (WPARAM)iItem, (LPARAM)&lvi);
+}
+
+inline int ListView_InsertItemW_Helper(HWND hwnd, const LVITEMW* pitem) {
+    return (int)SendMessageW(hwnd, LVM_INSERTITEMW, 0, (LPARAM)pitem);
+}
+
+inline int ListView_InsertColumnW_Helper(HWND hwnd, int iCol, const LVCOLUMNW* pcol) {
+    return (int)SendMessageW(hwnd, LVM_INSERTCOLUMNW, (WPARAM)iCol, (LPARAM)pcol);
+}
+
+inline int TabCtrl_InsertItemW_Helper(HWND hwnd, int iItem, const TCITEMW* pitem) {
+    return (int)SendMessageW(hwnd, TCM_INSERTITEMW, (WPARAM)iItem, (LPARAM)pitem);
+}
+
+inline BOOL TabCtrl_SetItemW_Helper(HWND hwnd, int iItem, const TCITEMW* pitem) {
+    return (BOOL)SendMessageW(hwnd, TCM_SETITEMW, (WPARAM)iItem, (LPARAM)pitem);
+}
+
+struct SaveRecord {
+    std::wstring time;
+    std::wstring action;
+    std::wstring player;
+    std::wstring key;
+    std::wstring val;
+};
+
+struct SaveItemKey {
+    std::wstring player;
+    std::wstring key;
+    bool operator<(const SaveItemKey& o) const {
+        if (player != o.player) return player < o.player;
+        return key < o.key;
+    }
+};
+
+CRITICAL_SECTION g_saveMonitorCs;
+std::vector<SaveRecord> g_pendingSaveRecords;
+std::map<SaveItemKey, int> g_saveKeyToIndex;
 
 // Conversion helper
 std::wstring Utf8ToWide(const std::string& str) {
@@ -292,6 +366,150 @@ bool SendPipeCommand(const std::string& cmd) {
     return ok != FALSE;
 }
 
+// Flexible parser supporting all known save formats:
+// 1. 1048602:Key=Val
+// 2. Key=Val (auto-assigns defPid)
+// 3. !save 1048602 Key Val or !save Key Val
+// 4. SAVE:1048602:Key:Val or SAVE:1048602:Key=Val
+// 5. Player 1048602 SAVED/LOADED: Key = Val
+// 6. [SaveServerValue] Player: 1048602 | Key: "Key" | Value: "Val"
+// 7. Space-separated: 1048602 Key Val
+bool ParseSaveLine(const std::string& rawLine, const std::string& defPid, std::string& outPid, std::string& outKey, std::string& outVal) {
+    std::string line = rawLine;
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
+    while (!line.empty() && (line.front() == ' ' || line.front() == '\t')) line.erase(line.begin());
+    if (line.empty() || line[0] == '#' || line[0] == ';') return false;
+
+    // 1. Strip !save or !SAVE prefix
+    if (line.rfind("!save ", 0) == 0 || line.rfind("!SAVE ", 0) == 0) {
+        line = line.substr(6);
+        while (!line.empty() && line.front() == ' ') line.erase(line.begin());
+    }
+
+    // 2. Strip SAVE: or save: prefix
+    if (line.rfind("SAVE:", 0) == 0 || line.rfind("save:", 0) == 0) {
+        line = line.substr(5);
+    }
+
+    // 3. Parse dztrace format: [SaveServerValue] / [GetServerValue] Player: 1048602 | Key: "xxx" | Value...: "yyy"
+    if (line.find("Player:") != std::string::npos && line.find("Key:") != std::string::npos) {
+        size_t pPos = line.find("Player:");
+        size_t kPos = line.find("Key:");
+        size_t vPos = line.find("Value");
+        if (pPos != std::string::npos && kPos != std::string::npos && vPos != std::string::npos) {
+            size_t pNumStart = line.find_first_of("0123456789", pPos);
+            if (pNumStart != std::string::npos) {
+                size_t pNumEnd = line.find_first_not_of("0123456789", pNumStart);
+                outPid = line.substr(pNumStart, (pNumEnd == std::string::npos ? line.length() : pNumEnd) - pNumStart);
+            }
+            size_t q1 = line.find('"', kPos);
+            size_t q2 = (q1 != std::string::npos) ? line.find('"', q1 + 1) : std::string::npos;
+            if (q1 != std::string::npos && q2 != std::string::npos) {
+                outKey = line.substr(q1 + 1, q2 - q1 - 1);
+            }
+            size_t q3 = line.find('"', vPos);
+            size_t q4 = (q3 != std::string::npos) ? line.find('"', q3 + 1) : std::string::npos;
+            if (q3 != std::string::npos && q4 != std::string::npos) {
+                outVal = line.substr(q3 + 1, q4 - q3 - 1);
+            }
+            if (!outKey.empty() && !outVal.empty()) {
+                if (outPid.empty()) outPid = defPid;
+                return true;
+            }
+        }
+    }
+
+    // 4. Parse local_save format: Player 1048602 SAVED: Key = Val or LOADED: Key = Val
+    if (line.find("Player ") == 0 && (line.find(" SAVED: ") != std::string::npos || line.find(" LOADED: ") != std::string::npos || line.find(" SET_STAT: ") != std::string::npos)) {
+        size_t sp1 = 7;
+        size_t sp2 = line.find(' ', sp1);
+        if (sp2 != std::string::npos) {
+            outPid = line.substr(sp1, sp2 - sp1);
+            size_t colon = line.find(": ", sp2);
+            size_t eq = line.find(" = ", colon);
+            if (colon != std::string::npos && eq != std::string::npos) {
+                outKey = line.substr(colon + 2, eq - (colon + 2));
+                outVal = line.substr(eq + 3);
+                return true;
+            }
+        }
+    }
+
+    // Helper trimmer
+    auto trimStr = [](std::string& s) {
+        while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r')) s.pop_back();
+        while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.erase(s.begin());
+    };
+
+    // 5. Standard Player:Key=Value (save_panel format)
+    size_t colon = line.find(':');
+    size_t eq = line.find('=');
+    if (colon != std::string::npos && eq != std::string::npos && colon < eq) {
+        outPid = line.substr(0, colon);
+        outKey = line.substr(colon + 1, eq - colon - 1);
+        outVal = line.substr(eq + 1);
+        trimStr(outPid);
+        trimStr(outKey);
+        trimStr(outVal);
+        if (!outKey.empty() && !outVal.empty()) {
+            if (outPid.empty()) outPid = defPid;
+            return true;
+        }
+    }
+
+    // 5b. Colon only: Player:Key:Val
+    if (colon != std::string::npos) {
+        size_t colon2 = line.find(':', colon + 1);
+        if (colon2 != std::string::npos) {
+            outPid = line.substr(0, colon);
+            outKey = line.substr(colon + 1, colon2 - colon - 1);
+            outVal = line.substr(colon2 + 1);
+            trimStr(outPid);
+            trimStr(outKey);
+            trimStr(outVal);
+            if (!outKey.empty() && !outVal.empty()) {
+                if (outPid.empty()) outPid = defPid;
+                return true;
+            }
+        }
+    }
+
+    // 6. Key=Value (without Player ID)
+    if (eq != std::string::npos) {
+        outPid = defPid;
+        outKey = line.substr(0, eq);
+        outVal = line.substr(eq + 1);
+        trimStr(outKey);
+        trimStr(outVal);
+        if (!outKey.empty() && !outVal.empty()) {
+            return true;
+        }
+    }
+
+    // 7. Space-separated tokens: Player Key Val (3 tokens) or Key Val (2 tokens)
+    std::stringstream tss(line);
+    std::vector<std::string> tokens;
+    std::string tok;
+    while (tss >> tok) tokens.push_back(tok);
+
+    if (tokens.size() >= 3) {
+        outPid = tokens[0];
+        outKey = tokens[1];
+        outVal = tokens[2];
+        for (size_t i = 3; i < tokens.size(); i++) {
+            outVal += " " + tokens[i];
+        }
+        return true;
+    } else if (tokens.size() == 2) {
+        outPid = defPid;
+        outKey = tokens[0];
+        outVal = tokens[1];
+        return true;
+    }
+
+    return false;
+}
+
 bool g_runLogTailer = true;
 HANDLE g_hLogTailerThread = NULL;
 
@@ -334,6 +552,52 @@ DWORD WINAPI LogTailerThread(LPVOID lpParam) {
                     while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
                     if (!line.empty()) {
                         AppendLog(Utf8ToWide(line));
+
+                        // Detect Save Monitor events
+                        if (line.find("[GetServerValue]") != std::string::npos ||
+                            line.find("[SaveServerValue]") != std::string::npos ||
+                            line.find("[Stat_SetStat]") != std::string::npos ||
+                            line.find("LOADED:") != std::string::npos ||
+                            line.find("SAVED:") != std::string::npos) {
+
+                            std::string defPid = "1048602";
+                            if (g_hEditPid) {
+                                char pBuf[64];
+                                GetWindowTextA(g_hEditPid, pBuf, sizeof(pBuf));
+                                if (strlen(pBuf) > 0) defPid = pBuf;
+                            }
+                            std::string pid, key, val;
+                            if (ParseSaveLine(line, defPid, pid, key, val)) {
+                                std::string actionStr = "存檔";
+                                if (line.find("GetServerValue") != std::string::npos || line.find("LOADED:") != std::string::npos) {
+                                    actionStr = "讀取 (GET)";
+                                } else if (line.find("SaveServerValue") != std::string::npos || line.find("SAVED:") != std::string::npos) {
+                                    actionStr = "寫入 (SAVE)";
+                                } else if (line.find("Stat_SetStat") != std::string::npos) {
+                                    actionStr = "統計 (STAT)";
+                                }
+
+                                auto now = std::chrono::system_clock::now();
+                                auto in_time_t = std::chrono::system_clock::to_time_t(now);
+                                struct tm tmbuf;
+                                localtime_s(&tmbuf, &in_time_t);
+                                wchar_t timeBuf[32];
+                                wcsftime(timeBuf, sizeof(timeBuf) / sizeof(wchar_t), L"%H:%M:%S", &tmbuf);
+
+                                SaveRecord rec;
+                                rec.time = timeBuf;
+                                rec.action = Utf8ToWide(actionStr);
+                                rec.player = Utf8ToWide(pid);
+                                rec.key = Utf8ToWide(key);
+                                rec.val = Utf8ToWide(val);
+
+                                EnterCriticalSection(&g_saveMonitorCs);
+                                g_pendingSaveRecords.push_back(rec);
+                                LeaveCriticalSection(&g_saveMonitorCs);
+
+                                PostMessage(g_hWnd, WM_USER_UPDATE_SAVE_LIST, 0, 0);
+                            }
+                        }
                     }
                 }
             }
@@ -520,26 +784,333 @@ void SaveAllFromPanel() {
     MessageBoxW(g_hWnd, (L"批量回寫完成！共送出 " + std::to_wstring(count) + L" 筆指令。").c_str(), L"成功", MB_ICONINFORMATION);
 }
 
-// Send Single Save Command
+// Execute Quick Save (Parses any save format and supports multiline batch)
+void ExecuteQuickSave(const std::string& rawText) {
+    if (rawText.empty()) {
+        MessageBoxW(g_hWnd, L"請輸入存檔指令或貼上存檔格式內容！", L"提示", MB_ICONWARNING);
+        return;
+    }
+
+    std::string defPid = "1048602";
+    if (g_hEditPid) {
+        char pBuf[64];
+        GetWindowTextA(g_hEditPid, pBuf, sizeof(pBuf));
+        if (strlen(pBuf) > 0) defPid = pBuf;
+    }
+
+    std::stringstream ss(rawText);
+    std::string line;
+    int successCount = 0;
+    int failCount = 0;
+
+    while (std::getline(ss, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
+        while (!line.empty() && (line.front() == ' ' || line.front() == '\t')) line.erase(line.begin());
+        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+
+        std::string pid, key, val;
+        if (ParseSaveLine(line, defPid, pid, key, val)) {
+            std::string payload = "SAVE:" + pid + ":" + key + ":" + val;
+            if (SendPipeCommand(payload)) {
+                successCount++;
+                AppendLog(L"[存檔寫入] 發送成功: " + Utf8ToWide(pid) + L":" + Utf8ToWide(key) + L"=" + Utf8ToWide(val));
+
+                // Also update Save Monitor immediately
+                auto now = std::chrono::system_clock::now();
+                auto in_time_t = std::chrono::system_clock::to_time_t(now);
+                struct tm tmbuf;
+                localtime_s(&tmbuf, &in_time_t);
+                wchar_t timeBuf[32];
+                wcsftime(timeBuf, sizeof(timeBuf) / sizeof(wchar_t), L"%H:%M:%S", &tmbuf);
+
+                SaveRecord rec;
+                rec.time = timeBuf;
+                rec.action = L"手動寫入 (SET)";
+                rec.player = Utf8ToWide(pid);
+                rec.key = Utf8ToWide(key);
+                rec.val = Utf8ToWide(val);
+
+                EnterCriticalSection(&g_saveMonitorCs);
+                g_pendingSaveRecords.push_back(rec);
+                LeaveCriticalSection(&g_saveMonitorCs);
+                PostMessage(g_hWnd, WM_USER_UPDATE_SAVE_LIST, 0, 0);
+
+                Sleep(15);
+            } else {
+                failCount++;
+                AppendLog(L"[-] 發送存檔失敗: " + Utf8ToWide(payload) + L" (魔獸尚未連線)");
+            }
+        } else {
+            failCount++;
+            AppendLog(L"[-] 無法解析存檔格式: " + Utf8ToWide(line));
+        }
+    }
+
+    if (successCount > 0) {
+        std::wstring msg = L"成功發送 " + std::to_wstring(successCount) + L" 筆存檔寫入指令！";
+        if (failCount > 0) msg += L"\n(無法發送 " + std::to_wstring(failCount) + L" 筆)";
+        MessageBoxW(g_hWnd, msg.c_str(), L"寫入結果", MB_ICONINFORMATION);
+    } else if (failCount > 0) {
+        MessageBoxW(g_hWnd, L"發送存檔指令失敗，請確認格式或確認魔獸是否已注入連線！", L"錯誤", MB_ICONERROR);
+    }
+}
+
+// Paste directly from clipboard and execute save
+void PasteAndExecuteQuickSave() {
+    if (!OpenClipboard(g_hWnd)) {
+        MessageBoxW(g_hWnd, L"無法開啟系統剪貼簿！", L"錯誤", MB_ICONERROR);
+        return;
+    }
+    HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+    if (!hData) {
+        CloseClipboard();
+        MessageBoxW(g_hWnd, L"剪貼簿中無文字內容！", L"提示", MB_ICONINFORMATION);
+        return;
+    }
+    wchar_t* pText = (wchar_t*)GlobalLock(hData);
+    if (!pText) {
+        CloseClipboard();
+        return;
+    }
+    std::wstring wstr(pText);
+    GlobalUnlock(hData);
+    CloseClipboard();
+
+    std::string str = WideToUtf8(wstr);
+    if (g_hEditQuickSave) {
+        SetWindowTextW(g_hEditQuickSave, wstr.c_str());
+    }
+    ExecuteQuickSave(str);
+}
+
+// Fill selected item from Save Monitor listview into the Quick Save input box
+void FillSelectedSaveToInput() {
+    if (!g_hListSaveMonitor) return;
+    int sel = ListView_GetNextItem(g_hListSaveMonitor, -1, LVNI_SELECTED);
+    if (sel == -1) {
+        MessageBoxW(g_hWnd, L"請先在存檔監控清單中選取任一筆項目！", L"提示", MB_ICONINFORMATION);
+        return;
+    }
+    wchar_t pidBuf[64], keyBuf[256], valBuf[512];
+    ListView_GetItemTextW_Helper(g_hListSaveMonitor, sel, 2, pidBuf, sizeof(pidBuf) / sizeof(wchar_t));
+    ListView_GetItemTextW_Helper(g_hListSaveMonitor, sel, 3, keyBuf, sizeof(keyBuf) / sizeof(wchar_t));
+    ListView_GetItemTextW_Helper(g_hListSaveMonitor, sel, 4, valBuf, sizeof(valBuf) / sizeof(wchar_t));
+
+    if (g_hEditPid && wcslen(pidBuf) > 0) {
+        SetWindowTextW(g_hEditPid, pidBuf);
+    }
+    if (g_hEditKey) {
+        SetWindowTextW(g_hEditKey, keyBuf);
+    }
+    if (g_hEditVal) {
+        SetWindowTextW(g_hEditVal, valBuf);
+    }
+
+    std::wstring line = std::wstring(pidBuf) + L":" + keyBuf + L"=" + valBuf;
+    if (g_hEditQuickSave) {
+        SetWindowTextW(g_hEditQuickSave, line.c_str());
+        SetFocus(g_hEditQuickSave);
+        size_t eqPos = line.find(L'=');
+        if (eqPos != std::wstring::npos) {
+            SendMessage(g_hEditQuickSave, EM_SETSEL, (WPARAM)(eqPos + 1), (LPARAM)line.length());
+        }
+    }
+    AppendLog(L"[+] 已自動填入存檔格式: " + line);
+}
+
+// Copy selected item from Save Monitor listview to clipboard in Player:Key=Val format
+void CopySelectedSaveItem() {
+    if (!g_hListSaveMonitor) return;
+    int sel = ListView_GetNextItem(g_hListSaveMonitor, -1, LVNI_SELECTED);
+    if (sel == -1) {
+        MessageBoxW(g_hWnd, L"請先在存檔監控清單中選取要複製的項目！", L"提示", MB_ICONINFORMATION);
+        return;
+    }
+    wchar_t pidBuf[64], keyBuf[256], valBuf[512];
+    ListView_GetItemTextW_Helper(g_hListSaveMonitor, sel, 2, pidBuf, sizeof(pidBuf) / sizeof(wchar_t));
+    ListView_GetItemTextW_Helper(g_hListSaveMonitor, sel, 3, keyBuf, sizeof(keyBuf) / sizeof(wchar_t));
+    ListView_GetItemTextW_Helper(g_hListSaveMonitor, sel, 4, valBuf, sizeof(valBuf) / sizeof(wchar_t));
+
+    std::wstring line = std::wstring(pidBuf) + L":" + keyBuf + L"=" + valBuf;
+    if (OpenClipboard(g_hWnd)) {
+        EmptyClipboard();
+        HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, (line.length() + 1) * sizeof(wchar_t));
+        if (hGlob) {
+            memcpy(GlobalLock(hGlob), line.c_str(), (line.length() + 1) * sizeof(wchar_t));
+            GlobalUnlock(hGlob);
+            SetClipboardData(CF_UNICODETEXT, hGlob);
+        }
+        CloseClipboard();
+        AppendLog(L"[+] 已複製存檔格式到剪貼簿: " + line);
+    }
+}
+
+// Batch update Save Monitor ListView on GUI thread
+void OnUpdateSaveList() {
+    std::vector<SaveRecord> pending;
+    EnterCriticalSection(&g_saveMonitorCs);
+    pending.swap(g_pendingSaveRecords);
+    LeaveCriticalSection(&g_saveMonitorCs);
+
+    if (pending.empty() || !g_hListSaveMonitor) return;
+
+    SendMessage(g_hListSaveMonitor, WM_SETREDRAW, FALSE, 0);
+
+    for (const auto& rec : pending) {
+        SaveItemKey sk{ rec.player, rec.key };
+        auto it = g_saveKeyToIndex.find(sk);
+        if (it != g_saveKeyToIndex.end()) {
+            int idx = it->second;
+            ListView_SetItemTextW_Helper(g_hListSaveMonitor, idx, 0, rec.time.c_str());
+            ListView_SetItemTextW_Helper(g_hListSaveMonitor, idx, 1, rec.action.c_str());
+            ListView_SetItemTextW_Helper(g_hListSaveMonitor, idx, 4, rec.val.c_str());
+        } else {
+            int rowIdx = ListView_GetItemCount(g_hListSaveMonitor);
+            LVITEMW lvi{};
+            lvi.mask = LVIF_TEXT;
+            lvi.iItem = rowIdx;
+            lvi.iSubItem = 0;
+            lvi.pszText = (LPWSTR)rec.time.c_str();
+            ListView_InsertItemW_Helper(g_hListSaveMonitor, &lvi);
+
+            ListView_SetItemTextW_Helper(g_hListSaveMonitor, rowIdx, 1, rec.action.c_str());
+            ListView_SetItemTextW_Helper(g_hListSaveMonitor, rowIdx, 2, rec.player.c_str());
+            ListView_SetItemTextW_Helper(g_hListSaveMonitor, rowIdx, 3, rec.key.c_str());
+            ListView_SetItemTextW_Helper(g_hListSaveMonitor, rowIdx, 4, rec.val.c_str());
+
+            g_saveKeyToIndex[sk] = rowIdx;
+        }
+    }
+
+    SendMessage(g_hListSaveMonitor, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(g_hListSaveMonitor, NULL, TRUE);
+
+    if (g_hTabMonitor) {
+        TCITEMW tci{};
+        tci.mask = TCIF_TEXT;
+        std::wstring tabTitle = L"💾 存檔即時監控 (" + std::to_wstring(ListView_GetItemCount(g_hListSaveMonitor)) + L" 筆)";
+        tci.pszText = (LPWSTR)tabTitle.c_str();
+        TabCtrl_SetItemW_Helper(g_hTabMonitor, 0, &tci);
+    }
+}
+
+// Load existing save variables from local_save.txt
+void LoadExistingSavesFromFile() {
+    std::string exeDir = GetExeDir();
+    std::string saveFile = exeDir + "local_save.txt";
+    std::ifstream infile(saveFile);
+    if (!infile.is_open()) {
+        infile.open("local_save.txt");
+        if (!infile.is_open()) return;
+    }
+
+    std::string line;
+    std::string defPid = "1048602";
+    if (g_hEditPid) {
+        char pBuf[64];
+        GetWindowTextA(g_hEditPid, pBuf, sizeof(pBuf));
+        if (strlen(pBuf) > 0) defPid = pBuf;
+    }
+    std::string detectedPid = "";
+
+    std::vector<SaveRecord> recs;
+    while (std::getline(infile, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (line.empty()) continue;
+
+        std::string pid, key, val;
+        if (ParseSaveLine(line, defPid, pid, key, val)) {
+            if (detectedPid.empty() && !pid.empty()) detectedPid = pid;
+
+            std::string actionStr = "讀取 (GET)";
+            if (line.find("SAVED:") != std::string::npos || line.find("SaveServerValue") != std::string::npos) {
+                actionStr = "寫入 (SAVE)";
+            } else if (line.find("SET_STAT:") != std::string::npos || line.find("Stat_SetStat") != std::string::npos) {
+                actionStr = "統計 (STAT)";
+            }
+
+            SaveRecord rec;
+            rec.time = L"--:--:--";
+            rec.action = Utf8ToWide(actionStr);
+            rec.player = Utf8ToWide(pid);
+            rec.key = Utf8ToWide(key);
+            rec.val = Utf8ToWide(val);
+            recs.push_back(rec);
+        }
+    }
+    infile.close();
+
+    if (!detectedPid.empty() && g_hEditPid) {
+        SetWindowTextA(g_hEditPid, detectedPid.c_str());
+    }
+
+    if (!recs.empty()) {
+        EnterCriticalSection(&g_saveMonitorCs);
+        for (const auto& r : recs) {
+            g_pendingSaveRecords.push_back(r);
+        }
+        LeaveCriticalSection(&g_saveMonitorCs);
+        PostMessage(g_hWnd, WM_USER_UPDATE_SAVE_LIST, 0, 0);
+        AppendLog(L"[存檔監控] 已從 local_save.txt 載入 " + std::to_wstring(recs.size()) + L" 筆歷史存檔紀錄");
+    }
+}
+
+// Toggle visibility between Save Monitor and All Logs tabs
+void SwitchMonitorTab() {
+    if (!g_hTabMonitor) return;
+    int curTab = TabCtrl_GetCurSel(g_hTabMonitor);
+    if (curTab == 0) {
+        ShowWindow(g_hListSaveMonitor, SW_SHOW);
+        ShowWindow(g_hBtnFillSaveInput, SW_SHOW);
+        ShowWindow(g_hBtnCopySaveItem, SW_SHOW);
+        ShowWindow(g_hBtnReloadSave, SW_SHOW);
+        ShowWindow(g_hBtnClearSaveList, SW_SHOW);
+
+        ShowWindow(g_hEditLog, SW_HIDE);
+        ShowWindow(g_hChkAutoScroll, SW_HIDE);
+        ShowWindow(g_hBtnClearLog, SW_HIDE);
+        ShowWindow(g_hBtnCopyLog, SW_HIDE);
+        ShowWindow(g_hBtnOpenTrace, SW_HIDE);
+    } else {
+        ShowWindow(g_hListSaveMonitor, SW_HIDE);
+        ShowWindow(g_hBtnFillSaveInput, SW_HIDE);
+        ShowWindow(g_hBtnCopySaveItem, SW_HIDE);
+        ShowWindow(g_hBtnReloadSave, SW_HIDE);
+        ShowWindow(g_hBtnClearSaveList, SW_HIDE);
+
+        ShowWindow(g_hEditLog, SW_SHOW);
+        ShowWindow(g_hChkAutoScroll, SW_SHOW);
+        ShowWindow(g_hBtnClearLog, SW_SHOW);
+        ShowWindow(g_hBtnCopyLog, SW_SHOW);
+        ShowWindow(g_hBtnOpenTrace, SW_SHOW);
+    }
+}
+
+// Send Single Save Command (Backward compatible or called by UI)
 void SendSingleSave() {
     char pBuf[64], kBuf[256], vBuf[512];
     GetWindowTextA(g_hEditPid, pBuf, sizeof(pBuf));
     GetWindowTextA(g_hEditKey, kBuf, sizeof(kBuf));
     GetWindowTextA(g_hEditVal, vBuf, sizeof(vBuf));
 
-    if (strlen(pBuf) == 0 || strlen(kBuf) == 0 || strlen(vBuf) == 0) {
-        AppendLog(L"[-] 手動存檔失敗: PlayerID, Key 與 Value 均不可為空！");
-        MessageBoxW(g_hWnd, L"請完整填寫 PlayerID、Key 與 Value！", L"提示", MB_ICONWARNING);
+    if (strlen(kBuf) > 0) {
+        std::string raw = std::string(kBuf);
+        if (strlen(vBuf) > 0) raw += "=" + std::string(vBuf);
+        ExecuteQuickSave(raw);
         return;
     }
 
-    std::string payload = std::string("SAVE:") + pBuf + ":" + kBuf + ":" + vBuf;
-    if (SendPipeCommand(payload)) {
-        AppendLog(L"[+] 已發送單筆存檔: " + Utf8ToWide(payload));
-    } else {
-        AppendLog(L"[-] 發送存檔指令失敗，請確認魔獸連線狀態。");
-        MessageBoxW(g_hWnd, L"發送失敗，請確認是否已注入遊戲！", L"錯誤", MB_ICONERROR);
+    if (g_hEditQuickSave) {
+        char qBuf[2048];
+        GetWindowTextA(g_hEditQuickSave, qBuf, sizeof(qBuf));
+        if (strlen(qBuf) > 0) {
+            ExecuteQuickSave(qBuf);
+            return;
+        }
     }
+
+    AppendLog(L"[-] 手動存檔失敗: 請輸入存檔內容或完整填寫 Key 與 Value！");
+    MessageBoxW(g_hWnd, L"請在存檔輸入框填寫或貼上存檔格式！\n例如: 1048602:ItemName=999 或 ItemName=999", L"提示", MB_ICONWARNING);
 }
 
 // Apply Mall Settings & Sync to Game
@@ -609,16 +1180,8 @@ void ProcessUserCommand(const std::string& cmd) {
     else if (c == "!saveall") {
         SaveAllFromPanel();
     }
-    else if (c.rfind("!save ", 0) == 0) {
-        std::stringstream ss(c.substr(6));
-        std::string p, k, v;
-        if (ss >> p >> k >> v) {
-            std::string payload = "SAVE:" + p + ":" + k + ":" + v;
-            SendPipeCommand(payload);
-            AppendLog(L"[+] 已發送存檔指令: " + Utf8ToWide(payload));
-        } else {
-            AppendLog(L"[-] 格式錯誤，正確格式: !save <PlayerID> <Key> <Value>");
-        }
+    else if (c.rfind("!save", 0) == 0 || c.rfind("SAVE:", 0) == 0 || c.find('=') != std::string::npos || (c.find(':') != std::string::npos && c.find(' ') == std::string::npos)) {
+        ExecuteQuickSave(c);
     }
     else if (c.rfind("!mall ", 0) == 0) {
         int m = atoi(c.substr(6).c_str());
@@ -667,6 +1230,18 @@ LRESULT CALLBACK EditCmdSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
         return 0;
     }
     return CallWindowProc(g_oldEditCmdProc, hWnd, uMsg, wParam, lParam);
+}
+
+// Subclass QuickSave EditBox for Enter key support
+LRESULT CALLBACK EditQuickSaveSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    if (uMsg == WM_CHAR && wParam == VK_RETURN) {
+        wchar_t buf[2048];
+        GetWindowTextW(hWnd, buf, sizeof(buf) / sizeof(wchar_t));
+        std::string cmd = WideToUtf8(buf);
+        ExecuteQuickSave(cmd);
+        return 0;
+    }
+    return CallWindowProc(g_oldEditQuickSaveProc, hWnd, uMsg, wParam, lParam);
 }
 
 // Subclass Percent EditBox to sync slider
@@ -731,7 +1306,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     case WM_CREATE: {
         INITCOMMONCONTROLSEX icex;
         icex.dwSize = sizeof(icex);
-        icex.dwICC = ICC_STANDARD_CLASSES | ICC_BAR_CLASSES;
+        icex.dwICC = ICC_STANDARD_CLASSES | ICC_BAR_CLASSES | ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES;
         InitCommonControlsEx(&icex);
 
         g_hFont = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
@@ -842,113 +1417,170 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         SendMessage(g_hSliderPercent, TBM_SETPOS, TRUE, (LPARAM)iniPct);
         SetWindowTextW(g_hEditPercent, std::to_wstring(iniPct).c_str());
 
-        // 3. Group 3: 伺服器存檔管理 (Save Panel)
-        HWND hGrp3 = CreateWindowW(L"BUTTON", L"【伺服器存檔管理 (Save Panel - 原版核心整合)】", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            15, 230, 850, 105, hWnd, (HMENU)IDC_GRP_SAVE, NULL, NULL);
+        // 3. Group 3: 伺服器存檔管理與即時寫入 (Save Panel & Direct Write)
+        HWND hGrp3 = CreateWindowW(L"BUTTON", L"【伺服器存檔管理與即時寫入 (支援直接複製貼上 Save 格式)】", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            15, 225, 850, 120, hWnd, (HMENU)IDC_GRP_SAVE, NULL, NULL);
         SendMessage(hGrp3, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
         HWND hBtnPanel = CreateWindowW(L"BUTTON", L"📝 產生並開啟存檔面板 (!panel)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            30, 250, 255, 32, hWnd, (HMENU)IDC_BTN_PANEL, NULL, NULL);
+            30, 245, 255, 30, hWnd, (HMENU)IDC_BTN_PANEL, NULL, NULL);
         SendMessage(hBtnPanel, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
         HWND hBtnSaveAll = CreateWindowW(L"BUTTON", L"⚡ 批量覆寫所有存檔 (!saveall)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            295, 250, 255, 32, hWnd, (HMENU)IDC_BTN_SAVEALL, NULL, NULL);
+            295, 245, 255, 30, hWnd, (HMENU)IDC_BTN_SAVEALL, NULL, NULL);
         SendMessage(hBtnSaveAll, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
         HWND hBtnOpenLocal = CreateWindowW(L"BUTTON", L"📂 開啟存檔日誌 (local_save.txt)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            560, 250, 290, 32, hWnd, (HMENU)IDC_BTN_OPEN_LOCALSAVE, NULL, NULL);
+            560, 245, 290, 30, hWnd, (HMENU)IDC_BTN_OPEN_LOCALSAVE, NULL, NULL);
         SendMessage(hBtnOpenLocal, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        HWND hLblQuick = CreateWindowW(L"STATIC", L"單筆寫入 (!save):", WS_CHILD | WS_VISIBLE | SS_LEFT,
-            30, 295, 125, 20, hWnd, NULL, NULL, NULL);
-        SendMessage(hLblQuick, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-
-        HWND hLblPid = CreateWindowW(L"STATIC", L"Player:", WS_CHILD | WS_VISIBLE | SS_LEFT,
-            160, 295, 45, 20, hWnd, NULL, NULL, NULL);
+        HWND hLblPid = CreateWindowW(L"STATIC", L"玩家ID:", WS_CHILD | WS_VISIBLE | SS_LEFT,
+            30, 287, 50, 20, hWnd, NULL, NULL, NULL);
         SendMessage(hLblPid, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
         g_hEditPid = CreateWindowW(L"EDIT", L"1048602", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-            210, 293, 85, 24, hWnd, (HMENU)IDC_EDIT_PID, NULL, NULL);
+            82, 284, 75, 25, hWnd, (HMENU)IDC_EDIT_PID, NULL, NULL);
         SendMessage(g_hEditPid, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        HWND hLblKey = CreateWindowW(L"STATIC", L"Key:", WS_CHILD | WS_VISIBLE | SS_LEFT,
-            305, 295, 30, 20, hWnd, NULL, NULL, NULL);
-        SendMessage(hLblKey, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        HWND hLblQuick = CreateWindowW(L"STATIC", L"快速存檔:", WS_CHILD | WS_VISIBLE | SS_LEFT,
+            165, 287, 65, 20, hWnd, NULL, NULL, NULL);
+        SendMessage(hLblQuick, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        g_hEditKey = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-            340, 293, 160, 24, hWnd, (HMENU)IDC_EDIT_KEY, NULL, NULL);
-        SendMessage(g_hEditKey, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        g_hEditQuickSave = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+            232, 284, 380, 25, hWnd, (HMENU)IDC_EDIT_QUICKSAVE, NULL, NULL);
+        SendMessage(g_hEditQuickSave, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        g_oldEditQuickSaveProc = (WNDPROC)SetWindowLongPtr(g_hEditQuickSave, GWLP_WNDPROC, (LONG_PTR)EditQuickSaveSubclassProc);
 
-        HWND hLblVal = CreateWindowW(L"STATIC", L"Value:", WS_CHILD | WS_VISIBLE | SS_LEFT,
-            510, 295, 45, 20, hWnd, NULL, NULL, NULL);
-        SendMessage(hLblVal, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        HWND hBtnQuickSave = CreateWindowW(L"BUTTON", L"💾 寫入存檔", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            620, 283, 105, 27, hWnd, (HMENU)IDC_BTN_QUICKSAVE, NULL, NULL);
+        SendMessage(hBtnQuickSave, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
-        g_hEditVal = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-            560, 293, 140, 24, hWnd, (HMENU)IDC_EDIT_VAL, NULL, NULL);
-        SendMessage(g_hEditVal, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        HWND hBtnPasteSave = CreateWindowW(L"BUTTON", L"📋 貼上並寫入", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            735, 283, 115, 27, hWnd, (HMENU)IDC_BTN_PASTE_SAVE, NULL, NULL);
+        SendMessage(hBtnPasteSave, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        HWND hBtnSaveSingle = CreateWindowW(L"BUTTON", L"寫入存檔", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            710, 291, 140, 28, hWnd, (HMENU)IDC_BTN_SAVE_SINGLE, NULL, NULL);
-        SendMessage(hBtnSaveSingle, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        HWND hLblHint = CreateWindowW(L"STATIC", L"💡 存檔格式支援: 玩家ID:Key=Value (例 1048602:HeroExp=9999)、Key=Value 或 !save 指令，支援多行批量貼上與 Enter 鍵發送", WS_CHILD | WS_VISIBLE | SS_LEFT,
+            30, 316, 820, 18, hWnd, NULL, NULL, NULL);
+        SendMessage(hLblHint, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
         // 4. Group 4: 原版 JassTool 快捷與終端指令
         HWND hGrp4 = CreateWindowW(L"BUTTON", L"【原版 JassTool 快捷與指令互動終端】", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            15, 345, 850, 65, hWnd, (HMENU)IDC_GRP_CMD, NULL, NULL);
+            15, 350, 850, 60, hWnd, (HMENU)IDC_GRP_CMD, NULL, NULL);
         SendMessage(hGrp4, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
         HWND hBtnKill = CreateWindowW(L"BUTTON", L"💀 秒殺選中單位 (!kill)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            30, 365, 175, 32, hWnd, (HMENU)IDC_BTN_KILL, NULL, NULL);
+            30, 370, 175, 30, hWnd, (HMENU)IDC_BTN_KILL, NULL, NULL);
         SendMessage(hBtnKill, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
         HWND hLblCmd = CreateWindowW(L"STATIC", L"Jass 指令:", WS_CHILD | WS_VISIBLE | SS_LEFT,
-            215, 371, 70, 20, hWnd, NULL, NULL, NULL);
+            215, 374, 70, 20, hWnd, NULL, NULL, NULL);
         SendMessage(hLblCmd, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
         g_hEditCmd = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-            290, 368, 430, 26, hWnd, (HMENU)IDC_EDIT_CMD, NULL, NULL);
+            290, 371, 430, 26, hWnd, (HMENU)IDC_EDIT_CMD, NULL, NULL);
         SendMessage(g_hEditCmd, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         g_oldEditCmdProc = (WNDPROC)SetWindowLongPtr(g_hEditCmd, GWLP_WNDPROC, (LONG_PTR)EditCmdSubclassProc);
 
         HWND hBtnSend = CreateWindowW(L"BUTTON", L"發送指令", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            730, 366, 120, 30, hWnd, (HMENU)IDC_BTN_SEND_CMD, NULL, NULL);
+            730, 369, 120, 30, hWnd, (HMENU)IDC_BTN_SEND_CMD, NULL, NULL);
         SendMessage(hBtnSend, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        // 5. Group 5: 即時串流監控 (Live Monitor)
-        HWND hGrp5 = CreateWindowW(L"BUTTON", L"【即時串流監控 (Live Monitor)】", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            15, 420, 850, 270, hWnd, (HMENU)IDC_GRP_LOG, NULL, NULL);
+        // 5. Group 5: 即時監控中心 (Live Monitor Center)
+        HWND hGrp5 = CreateWindowW(L"BUTTON", L"【即時監控中心 (Live Monitor)】", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            15, 415, 850, 300, hWnd, (HMENU)IDC_GRP_LOG, NULL, NULL);
         SendMessage(hGrp5, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
-        HWND hLblLog = CreateWindowW(L"STATIC", L"即時 JASS / DzAPI 串流日誌:", WS_CHILD | WS_VISIBLE | SS_LEFT,
-            30, 440, 200, 20, hWnd, NULL, NULL, NULL);
-        SendMessage(hLblLog, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        // Tab Control for Monitor
+        g_hTabMonitor = CreateWindowW(WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+            30, 435, 340, 28, hWnd, (HMENU)IDC_TAB_MONITOR, NULL, NULL);
+        SendMessage(g_hTabMonitor, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        TCITEMW tci0{};
+        tci0.mask = TCIF_TEXT;
+        tci0.pszText = (LPWSTR)L"💾 存檔即時監控 (0 筆)";
+        TabCtrl_InsertItemW_Helper(g_hTabMonitor, 0, &tci0);
+        TCITEMW tci1{};
+        tci1.mask = TCIF_TEXT;
+        tci1.pszText = (LPWSTR)L"📜 全部串流日誌";
+        TabCtrl_InsertItemW_Helper(g_hTabMonitor, 1, &tci1);
 
-        g_hChkAutoScroll = CreateWindowW(L"BUTTON", L"自動滾動", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            420, 440, 100, 20, hWnd, (HMENU)IDC_CHK_AUTO_SCROLL, NULL, NULL);
+        // Save Monitor Toolbar Buttons (Tab 0)
+        g_hBtnFillSaveInput = CreateWindowW(L"BUTTON", L"✏️ 填入輸入框", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            380, 435, 120, 26, hWnd, (HMENU)IDC_BTN_FILL_SAVE_INPUT, NULL, NULL);
+        SendMessage(g_hBtnFillSaveInput, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
+        g_hBtnCopySaveItem = CreateWindowW(L"BUTTON", L"📋 複製格式 (P:K=V)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            508, 435, 145, 26, hWnd, (HMENU)IDC_BTN_COPY_SAVE_ITEM, NULL, NULL);
+        SendMessage(g_hBtnCopySaveItem, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
+        g_hBtnReloadSave = CreateWindowW(L"BUTTON", L"🔄 重新讀取存檔", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            660, 435, 115, 26, hWnd, (HMENU)IDC_BTN_RELOAD_SAVE, NULL, NULL);
+        SendMessage(g_hBtnReloadSave, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
+        g_hBtnClearSaveList = CreateWindowW(L"BUTTON", L"清空清單", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            782, 435, 68, 26, hWnd, (HMENU)IDC_BTN_CLEAR_SAVE_LIST, NULL, NULL);
+        SendMessage(g_hBtnClearSaveList, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
+        // General Log Toolbar Buttons (Tab 1, initially hidden)
+        g_hChkAutoScroll = CreateWindowW(L"BUTTON", L"自動滾動", WS_CHILD | BS_AUTOCHECKBOX,
+            420, 438, 90, 20, hWnd, (HMENU)IDC_CHK_AUTO_SCROLL, NULL, NULL);
         SendMessage(g_hChkAutoScroll, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         SendMessage(g_hChkAutoScroll, BM_SETCHECK, BST_CHECKED, 0);
 
-        HWND hBtnClear = CreateWindowW(L"BUTTON", L"清空日誌", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            530, 437, 95, 24, hWnd, (HMENU)IDC_BTN_CLEAR_LOG, NULL, NULL);
-        SendMessage(hBtnClear, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        g_hBtnClearLog = CreateWindowW(L"BUTTON", L"清空日誌", WS_CHILD | BS_PUSHBUTTON,
+            520, 435, 95, 26, hWnd, (HMENU)IDC_BTN_CLEAR_LOG, NULL, NULL);
+        SendMessage(g_hBtnClearLog, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        HWND hBtnCopy = CreateWindowW(L"BUTTON", L"複製日誌", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            635, 437, 95, 24, hWnd, (HMENU)IDC_BTN_COPY_LOG, NULL, NULL);
-        SendMessage(hBtnCopy, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        g_hBtnCopyLog = CreateWindowW(L"BUTTON", L"複製日誌", WS_CHILD | BS_PUSHBUTTON,
+            625, 435, 95, 26, hWnd, (HMENU)IDC_BTN_COPY_LOG, NULL, NULL);
+        SendMessage(g_hBtnCopyLog, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        HWND hBtnTrace = CreateWindowW(L"BUTTON", L"開啟 dztrace.log", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            740, 437, 110, 24, hWnd, (HMENU)IDC_BTN_OPEN_TRACE, NULL, NULL);
-        SendMessage(hBtnTrace, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        g_hBtnOpenTrace = CreateWindowW(L"BUTTON", L"開啟 dztrace.log", WS_CHILD | BS_PUSHBUTTON,
+            730, 435, 120, 26, hWnd, (HMENU)IDC_BTN_OPEN_TRACE, NULL, NULL);
+        SendMessage(g_hBtnOpenTrace, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        g_hEditLog = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-            30, 465, 820, 215, hWnd, (HMENU)IDC_EDIT_LOG, NULL, NULL);
+        // Save Monitor ListView (Tab 0)
+        g_hListSaveMonitor = CreateWindowW(WC_LISTVIEWW, L"",
+            WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_VSCROLL,
+            30, 466, 820, 238, hWnd, (HMENU)IDC_LIST_SAVE_MONITOR, NULL, NULL);
+        SendMessage(g_hListSaveMonitor, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        ListView_SetExtendedListViewStyle(g_hListSaveMonitor, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+
+        LVCOLUMNW lvc{};
+        lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        
+        lvc.iSubItem = 0; lvc.pszText = (LPWSTR)L"時間"; lvc.cx = 75;
+        ListView_InsertColumnW_Helper(g_hListSaveMonitor, 0, &lvc);
+
+        lvc.iSubItem = 1; lvc.pszText = (LPWSTR)L"操作"; lvc.cx = 90;
+        ListView_InsertColumnW_Helper(g_hListSaveMonitor, 1, &lvc);
+
+        lvc.iSubItem = 2; lvc.pszText = (LPWSTR)L"玩家 ID"; lvc.cx = 80;
+        ListView_InsertColumnW_Helper(g_hListSaveMonitor, 2, &lvc);
+
+        lvc.iSubItem = 3; lvc.pszText = (LPWSTR)L"存檔變數 (Key)"; lvc.cx = 250;
+        ListView_InsertColumnW_Helper(g_hListSaveMonitor, 3, &lvc);
+
+        lvc.iSubItem = 4; lvc.pszText = (LPWSTR)L"數值 (Value)"; lvc.cx = 305;
+        ListView_InsertColumnW_Helper(g_hListSaveMonitor, 4, &lvc);
+
+        // All Logs EditBox (Tab 1, initially hidden)
+        g_hEditLog = CreateWindowW(L"EDIT", L"",
+            WS_CHILD | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+            30, 466, 820, 238, hWnd, (HMENU)IDC_EDIT_LOG, NULL, NULL);
         SendMessage(g_hEditLog, WM_SETFONT, (WPARAM)g_hFontConsole, TRUE);
+
+        // Ensure Tab 0 visibility is active
+        SwitchMonitorTab();
+
+        // Load existing saves from local_save.txt if available
+        LoadExistingSavesFromFile();
 
         // Status Check Timer (Every 1000ms)
         SetTimer(hWnd, IDT_TIMER_STATUS, 1000, NULL);
         UpdateStatus();
 
         AppendLog(L"=== 魔獸爭霸 III JASS 開發者整合控制面板 v2.1 初始化完成 ===");
-        AppendLog(L"[*] 支援一鍵注入、原版 JassTool 終端、存檔面板 (!panel, !saveall) 與商城比例黑名單");
+        AppendLog(L"[*] 支援一鍵注入、即時存檔監控、直接複製貼上 Save 格式、原版 JassTool 終端與商城比例黑名單");
         break;
     }
 
@@ -1072,6 +1704,44 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             SendSingleSave();
             break;
 
+        case IDC_BTN_QUICKSAVE: {
+            wchar_t buf[2048];
+            GetWindowTextW(g_hEditQuickSave, buf, sizeof(buf) / sizeof(wchar_t));
+            std::string text = WideToUtf8(buf);
+            ExecuteQuickSave(text);
+            break;
+        }
+
+        case IDC_BTN_PASTE_SAVE:
+            PasteAndExecuteQuickSave();
+            break;
+
+        case IDC_BTN_FILL_SAVE_INPUT:
+            FillSelectedSaveToInput();
+            break;
+
+        case IDC_BTN_COPY_SAVE_ITEM:
+            CopySelectedSaveItem();
+            break;
+
+        case IDC_BTN_RELOAD_SAVE:
+            LoadExistingSavesFromFile();
+            break;
+
+        case IDC_BTN_CLEAR_SAVE_LIST:
+            if (g_hListSaveMonitor) {
+                ListView_DeleteAllItems(g_hListSaveMonitor);
+                g_saveKeyToIndex.clear();
+                if (g_hTabMonitor) {
+                    TCITEMW tci{};
+                    tci.mask = TCIF_TEXT;
+                    tci.pszText = (LPWSTR)L"💾 存檔即時監控 (0 筆)";
+                    TabCtrl_SetItemW_Helper(g_hTabMonitor, 0, &tci);
+                }
+                AppendLog(L"[+] 已清空存檔監控清單。");
+            }
+            break;
+
         case IDC_BTN_KILL:
             if (SendPipeCommand("KILL")) {
                 AppendLog(L"[+] 已發送秒殺選中單位指令 (KILL)");
@@ -1127,6 +1797,25 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         break;
     }
 
+    case WM_NOTIFY: {
+        LPNMHDR pnmh = (LPNMHDR)lParam;
+        if (pnmh->idFrom == IDC_LIST_SAVE_MONITOR) {
+            if (pnmh->code == NM_DBLCLK) {
+                FillSelectedSaveToInput();
+            }
+        } else if (pnmh->idFrom == IDC_TAB_MONITOR) {
+            if (pnmh->code == TCN_SELCHANGE) {
+                SwitchMonitorTab();
+            }
+        }
+        break;
+    }
+
+    case WM_USER_UPDATE_SAVE_LIST: {
+        OnUpdateSaveList();
+        break;
+    }
+
     case WM_DESTROY: {
         KillTimer(hWnd, IDT_TIMER_STATUS);
         g_runLogTailer = false;
@@ -1141,6 +1830,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         if (g_hFontBold) DeleteObject(g_hFontBold);
         if (g_hFontConsole) DeleteObject(g_hFontConsole);
         DeleteCriticalSection(&g_pipeCs);
+        DeleteCriticalSection(&g_saveMonitorCs);
         PostQuitMessage(0);
         break;
     }
@@ -1153,6 +1843,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     InitializeCriticalSection(&g_pipeCs);
+    InitializeCriticalSection(&g_saveMonitorCs);
     
     // Create non-blocking Log Tailer Thread
     g_hLogTailerThread = CreateThread(NULL, 0, LogTailerThread, NULL, 0, NULL);
@@ -1172,7 +1863,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 1;
     }
 
-    RECT rc = { 0, 0, 880, 700 };
+    RECT rc = { 0, 0, 880, 750 };
     AdjustWindowRect(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
     int winW = rc.right - rc.left;
     int winH = rc.bottom - rc.top;
