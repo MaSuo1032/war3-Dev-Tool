@@ -335,16 +335,39 @@ DWORD WINAPI BatchReadWorkerThread(LPVOID lpParam) {
     std::string exeDir = GetExeDir();
     std::string keyPath = exeDir + "map_keys.txt";
     std::vector<std::string> keys;
+    std::string sourceDesc = "map_keys.txt";
+
+    // 1. Try map_keys.txt
     if (!LoadMapKeysFile(keyPath, keys)) {
         keyPath = "map_keys.txt";
         LoadMapKeysFile(keyPath, keys);
     }
 
+    // 2. Fallback to discovered_keys.txt (automatically captured history)
     if (keys.empty()) {
-        AppendLog(L"[-] 找不到 map_keys.txt 或變數清單為空！請先點擊「📂 提取Key」或「📜 編輯變數名單」。");
-        MessageBoxW(g_hWnd, L"找不到 map_keys.txt 或變數清單為空！\n請先確認目錄下有 map_keys.txt，或點擊「📂 提取Key」從地圖自動提取。", L"提示", MB_ICONWARNING);
-        g_isBatchReading = false;
-        return 0;
+        std::string discPath = exeDir + "discovered_keys.txt";
+        if (LoadMapKeysFile(discPath, keys)) {
+            sourceDesc = "discovered_keys.txt (動態學習庫)";
+        } else {
+            discPath = "discovered_keys.txt";
+            if (LoadMapKeysFile(discPath, keys)) {
+                sourceDesc = "discovered_keys.txt (動態學習庫)";
+            }
+        }
+    }
+
+    // 3. Fallback to live keys already in Save Monitor table
+    if (keys.empty() && g_hListSaveMonitor) {
+        int count = ListView_GetItemCount(g_hListSaveMonitor);
+        std::set<std::string> uniqueKeys;
+        for (int i = 0; i < count; ++i) {
+            wchar_t kBuf[256];
+            ListView_GetItemTextW_Helper(g_hListSaveMonitor, i, 3, kBuf, 256);
+            std::string k = WideToUtf8(kBuf);
+            if (!k.empty() && k != "(null)") uniqueKeys.insert(k);
+        }
+        for (const auto& k : uniqueKeys) keys.push_back(k);
+        if (!keys.empty()) sourceDesc = "即時監控列表已捕捉項目";
     }
 
     if (!ConnectPipe()) {
@@ -361,7 +384,16 @@ DWORD WINAPI BatchReadWorkerThread(LPVOID lpParam) {
         if (strlen(pBuf) > 0) defPid = pBuf;
     }
 
-    AppendLog(L"[*] 開始向伺服器一鍵遍歷讀取存檔 (目標玩家: " + Utf8ToWide(defPid) + L", 共 " + std::to_wstring(keys.size()) + L" 筆變數)...");
+    // 4. If still empty, delegate to DLL's in-memory dynamic discovery via READ_ALL
+    if (keys.empty()) {
+        AppendLog(L"[*] 本地無靜態名單，已委託 JassHook 核心調用進程中動態學習到的全部變數進行遍歷讀取 (READ_ALL)...");
+        SendPipeCommand("READ_ALL:" + defPid);
+        MessageBoxW(g_hWnd, L"已透過核心動態學習庫發送遍歷讀取指令！\n\n數值將於數秒內陸續在「存檔即時監控」列表中呈現。\n(提示：只要進入魔獸地圖，系統會自動捕捉當前地圖的所有存檔變數，無須手動提供 map.j)", L"動態遍歷讀取進行中", MB_ICONINFORMATION);
+        g_isBatchReading = false;
+        return 0;
+    }
+
+    AppendLog(L"[*] 開始向伺服器一鍵遍歷讀取存檔 [來源: " + Utf8ToWide(sourceDesc) + L"] (目標玩家: " + Utf8ToWide(defPid) + L", 共 " + std::to_wstring(keys.size()) + L" 筆變數)...");
 
     int count = 0;
     for (size_t i = 0; i < keys.size(); ++i) {
@@ -375,7 +407,7 @@ DWORD WINAPI BatchReadWorkerThread(LPVOID lpParam) {
     }
 
     AppendLog(L"[+] 遍歷讀取請求發送完畢！共向伺服器查詢 " + std::to_wstring(count) + L" 筆變數，數值將即時顯示於「存檔即時監控」列表中。");
-    MessageBoxW(g_hWnd, (L"遍歷讀取請求發送完成！共向伺服器查詢 " + std::to_wstring(count) + L" 筆存檔變數。\n\n數值將於數秒內陸續在「存檔即時監控」列表中呈現。").c_str(), L"遍歷讀取完成", MB_ICONINFORMATION);
+    MessageBoxW(g_hWnd, (L"遍歷讀取請求發送完成！共向伺服器查詢 " + std::to_wstring(count) + L" 筆存檔變數。\n[來源: " + Utf8ToWide(sourceDesc) + L"]\n\n數值將於數秒內陸續在「存檔即時監控」列表中呈現。").c_str(), L"遍歷讀取完成", MB_ICONINFORMATION);
     g_isBatchReading = false;
     return 0;
 }

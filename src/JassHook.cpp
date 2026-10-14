@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_set>
+#include <set>
 #include <string>
 #include <fstream>
 #include <sstream>
@@ -151,6 +152,45 @@ bool IsTrapHoneypot(const char* keyStr) {
     return false;
 }
 
+// ==========================================
+// Dynamic Map Save Keys Auto-Discovery (Zero map.j Dependency)
+// ==========================================
+CRITICAL_SECTION g_keyCs;
+bool g_keyCsInitialized = false;
+std::set<std::string> g_autoCapturedKeys;
+
+void RecordDiscoveredKey(const char* keyStr) {
+    if (!keyStr || keyStr[0] == '\0' || strcmp(keyStr, "(null)") == 0) return;
+    if (IsTrapHoneypot(keyStr)) return;
+
+    if (!g_keyCsInitialized) {
+        InitializeCriticalSection(&g_keyCs);
+        g_keyCsInitialized = true;
+    }
+
+    std::string k = keyStr;
+    bool isNew = false;
+    EnterCriticalSection(&g_keyCs);
+    if (g_autoCapturedKeys.find(k) == g_autoCapturedKeys.end()) {
+        g_autoCapturedKeys.insert(k);
+        isNew = true;
+    }
+    LeaveCriticalSection(&g_keyCs);
+
+    if (isNew) {
+        wchar_t keyPath[MAX_PATH];
+        swprintf_s(keyPath, MAX_PATH, L"%s\\discovered_keys.txt", g_DllDirectory);
+        FILE* fp = nullptr;
+        if (_wfopen_s(&fp, keyPath, L"a") == 0 && fp) {
+            fprintf(fp, "%s\n", k.c_str());
+            fclose(fp);
+        }
+        char log[256];
+        sprintf_s(log, sizeof(log), "[AutoDiscovery] Discovered save key: \"%s\" (Total: %zu)\n", k.c_str(), g_autoCapturedKeys.size());
+        ConsoleLog(log);
+    }
+}
+
 struct InvokeData {
     void* func_ptr;
     const char* sig;
@@ -201,8 +241,14 @@ void __cdecl GenericDzTraceHandler(int index, DWORD* orig_esp) {
         
         if (hasStr1 && hasStr2) {
             sprintf_s(parsedArgs, sizeof(parsedArgs), " | Str: \"%s\", \"%s\"", str1, str2);
+            if (strstr(g_natives[index].name, "Server") || strstr(g_natives[index].name, "Stat") || strstr(g_natives[index].name, "Archive")) {
+                RecordDiscoveredKey(str1);
+            }
         } else if (hasStr1) {
             sprintf_s(parsedArgs, sizeof(parsedArgs), " | Str: \"%s\"", str1);
+            if (strstr(g_natives[index].name, "Server") || strstr(g_natives[index].name, "Stat") || strstr(g_natives[index].name, "Archive") || strstr(g_natives[index].name, "Mall")) {
+                RecordDiscoveredKey(str1);
+            }
         }
         
         char log[512];
@@ -332,6 +378,10 @@ int __cdecl Monitor_SaveServerValue(int player, DWORD key_ptr, DWORD value_ptr) 
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 
+    if (keyStr && strcmp(keyStr, "(null)") != 0) {
+        RecordDiscoveredKey(keyStr);
+    }
+
     sprintf_s(log, sizeof(log), "[SaveServerValue] Player: %d | Key: \"%s\" | Value: \"%s\"\n", player, keyStr, valStr);
     ConsoleLog(log);
     
@@ -372,6 +422,10 @@ void __cdecl Monitor_Stat_SetStat(int player, DWORD key_ptr, DWORD value_ptr) {
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 
+    if (keyStr && strcmp(keyStr, "(null)") != 0) {
+        RecordDiscoveredKey(keyStr);
+    }
+
     sprintf_s(log, sizeof(log), "[Stat_SetStat] Player: %d | Key: \"%s\" | Value: \"%s\"\n", player, keyStr, valStr);
     ConsoleLog(log);
     
@@ -401,6 +455,10 @@ DWORD __cdecl Monitor_GetServerValue(int player, DWORD key_ptr) {
             }
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
+
+    if (keyStr && strcmp(keyStr, "(null)") != 0) {
+        RecordDiscoveredKey(keyStr);
+    }
 
     RemoveTrampoline(hkGet);
     typedef DWORD(__cdecl *FuncType)(int, DWORD);
@@ -781,38 +839,73 @@ void ProcessSingleCommand(const std::string& cmd) {
             if (p != 0) targetPlayer = p;
         }
 
+        std::set<std::string> allKeysToQuery;
+
+        // 1. Load from map_keys.txt if available
         wchar_t keyPath[MAX_PATH];
         swprintf_s(keyPath, MAX_PATH, L"%s\\map_keys.txt", g_DllDirectory);
         std::ifstream kfile(keyPath);
-        if (!kfile.is_open()) {
-            kfile.open("map_keys.txt");
-        }
+        if (!kfile.is_open()) kfile.open("map_keys.txt");
         if (kfile.is_open()) {
             std::string line;
-            int count = 0;
-            char startLog[256];
-            sprintf_s(startLog, sizeof(startLog), "[Control] Starting READ_ALL for Player %d...\n", targetPlayer);
-            ConsoleLog(startLog);
             while (std::getline(kfile, line)) {
                 while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
                 while (!line.empty() && line.front() == ' ') line.erase(line.begin());
                 if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+                allKeysToQuery.insert(line);
+            }
+            kfile.close();
+        }
+
+        // 2. Load from discovered_keys.txt (automatically captured history)
+        wchar_t discPath[MAX_PATH];
+        swprintf_s(discPath, MAX_PATH, L"%s\\discovered_keys.txt", g_DllDirectory);
+        std::ifstream dfile(discPath);
+        if (!dfile.is_open()) dfile.open("discovered_keys.txt");
+        if (dfile.is_open()) {
+            std::string line;
+            while (std::getline(dfile, line)) {
+                while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
+                while (!line.empty() && line.front() == ' ') line.erase(line.begin());
+                if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+                allKeysToQuery.insert(line);
+            }
+            dfile.close();
+        }
+
+        // 3. Merge in-memory discovered keys
+        if (!g_keyCsInitialized) {
+            InitializeCriticalSection(&g_keyCs);
+            g_keyCsInitialized = true;
+        }
+        EnterCriticalSection(&g_keyCs);
+        for (const auto& k : g_autoCapturedKeys) {
+            allKeysToQuery.insert(k);
+        }
+        LeaveCriticalSection(&g_keyCs);
+
+        if (!allKeysToQuery.empty()) {
+            int count = 0;
+            char startLog[256];
+            sprintf_s(startLog, sizeof(startLog), "[Control] Starting READ_ALL for Player %d (Total: %zu keys across map_keys + auto-discovery)...\n", 
+                      targetPlayer, allKeysToQuery.size());
+            ConsoleLog(startLog);
+            for (const auto& k : allKeysToQuery) {
                 if (g_gameHwnd) {
                     SaveData sd;
                     sd.player = targetPlayer;
-                    strncpy_s(sd.key, line.c_str(), sizeof(sd.key));
+                    strncpy_s(sd.key, k.c_str(), sizeof(sd.key));
                     sd.val[0] = '\0';
                     SendMessageA(g_gameHwnd, WM_APP + 4, 0, (LPARAM)&sd);
                     count++;
                     Sleep(15);
                 }
             }
-            kfile.close();
             char endLog[256];
-            sprintf_s(endLog, sizeof(endLog), "[Control] READ_ALL completed: queried %d keys from map_keys.txt.\n", count);
+            sprintf_s(endLog, sizeof(endLog), "[Control] READ_ALL completed: queried %d keys from server.\n", count);
             ConsoleLog(endLog);
         } else {
-            ConsoleLog("[Control] READ_ALL failed: map_keys.txt not found!\n");
+            ConsoleLog("[Control] READ_ALL failed: No keys found in map_keys.txt or auto-discovery cache!\n");
         }
     }
     else if (cmd.rfind("MALL:", 0) == 0) {
