@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(MSVC)
     add_compile_options(/utf-8 /W3)
-    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS)
 endif()
 
 # Output directories
@@ -35,11 +35,12 @@ if(MSVC)
     set_target_properties(Injector PROPERTIES LINK_FLAGS "/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\"")
 endif()
 
-# 4. All-in-One GUI Client (Injector + Dev Tool Panel)
+# 4. All-in-One GUI Client (Injector + Dev Tool Panel + Web Controller)
 add_executable(War3DevToolUI WIN32
     src/gui.cpp
+    src/Wc3Memory.cpp
 )
-target_link_libraries(War3DevToolUI PRIVATE user32 kernel32 gdi32 comctl32 shell32 advapi32 comdlg32)
+target_link_libraries(War3DevToolUI PRIVATE user32 kernel32 gdi32 comctl32 shell32 advapi32 comdlg32 ws2_32)
 if(MSVC)
     set_target_properties(War3DevToolUI PROPERTIES LINK_FLAGS "/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\"")
 endif()

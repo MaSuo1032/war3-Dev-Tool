@@ -57,6 +57,57 @@
 #define IDC_BTN_EDIT_MAP_KEYS     1061
 #define IDC_BTN_EXTRACT_KEYS      1062
 
+// Web Controller & Direct Memory Modification Controls
+#define IDC_BTN_MEM_HEAL          1070
+#define IDC_BTN_MEM_GODMODE       1071
+#define IDC_BTN_MEM_SPEED         1072
+#define IDC_BTN_MEM_STATS         1073
+#define IDC_BTN_MEM_GOLD          1074
+#define IDC_BTN_MEM_LUMBER        1075
+#define IDC_BTN_OPEN_WEB_UI       1076
+
+#define IDC_BTN_MEM_SCAN          1080
+#define IDC_BTN_MEM_SCAN_RES      1081
+#define IDC_EDIT_UNIT_HP          1082
+#define IDC_EDIT_UNIT_MAXHP       1083
+#define IDC_BTN_SET_HP            1084
+#define IDC_EDIT_UNIT_MP          1085
+#define IDC_EDIT_UNIT_MAXMP       1086
+#define IDC_BTN_SET_MP            1087
+#define IDC_EDIT_UNIT_STR         1088
+#define IDC_BTN_SET_STR           1089
+#define IDC_EDIT_UNIT_AGI         1090
+#define IDC_BTN_SET_AGI           1091
+#define IDC_EDIT_UNIT_INT         1092
+#define IDC_BTN_SET_INT           1093
+#define IDC_EDIT_UNIT_SPEED       1094
+#define IDC_BTN_SET_SPEED         1095
+#define IDC_EDIT_UNIT_DEF         1096
+#define IDC_BTN_SET_DEF           1097
+#define IDC_EDIT_UNIT_EXP         1098
+#define IDC_BTN_SET_EXP           1099
+
+#define IDC_CMB_RES_PLAYER        1100
+#define IDC_EDIT_RES_GOLD         1101
+#define IDC_BTN_SET_RES_GOLD      1102
+#define IDC_BTN_ADD_RES_GOLD      1103
+#define IDC_EDIT_RES_LUMBER       1104
+#define IDC_BTN_SET_RES_LUMBER    1105
+#define IDC_BTN_ADD_RES_LUMBER    1106
+
+#define IDC_EDIT_ITEM_SLOT0       1110
+#define IDC_EDIT_ITEM_SLOT1       1111
+#define IDC_EDIT_ITEM_SLOT2       1112
+#define IDC_EDIT_ITEM_SLOT3       1113
+#define IDC_EDIT_ITEM_SLOT4       1114
+#define IDC_EDIT_ITEM_SLOT5       1115
+#define IDC_BTN_SET_ITEM_SLOT0    1116
+#define IDC_BTN_SET_ITEM_SLOT1    1117
+#define IDC_BTN_SET_ITEM_SLOT2    1118
+#define IDC_BTN_SET_ITEM_SLOT3    1119
+#define IDC_BTN_SET_ITEM_SLOT4    1120
+#define IDC_BTN_SET_ITEM_SLOT5    1121
+
 #define IDT_TIMER_STATUS          1
 #define WM_USER_UPDATE_SAVE_LIST  (WM_USER + 101)
 

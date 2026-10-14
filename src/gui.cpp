@@ -1,4 +1,5 @@
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
@@ -16,11 +17,13 @@
 #include "ProcessInjector.h"
 #include "PipeClient.h"
 #include "MapKeyExtractor.h"
+#include "WebControllerServer.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "ws2_32.lib")
 #pragma comment(linker,"\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 // Global GUI Handles
@@ -49,6 +52,67 @@ HWND g_hBtnReloadSave = NULL;
 HWND g_hBtnClearLog = NULL;
 HWND g_hBtnCopyLog = NULL;
 HWND g_hBtnOpenTrace = NULL;
+
+// Quick Memory Action Buttons (Group 4)
+HWND g_hBtnMemHeal = NULL;
+HWND g_hBtnMemGod = NULL;
+HWND g_hBtnMemSpeed = NULL;
+HWND g_hBtnMemStats = NULL;
+HWND g_hBtnMemGold = NULL;
+HWND g_hBtnMemLumber = NULL;
+HWND g_hBtnOpenWebUi = NULL;
+
+// Tab 1: Memory Controller Controls
+std::vector<HWND> g_memControls;
+HWND g_hLblUnitHeader = NULL;
+HWND g_hBtnMemScan = NULL;
+HWND g_hBtnMemScanRes = NULL;
+HWND g_hBtnWebUiInTab = NULL;
+
+HWND g_hEditUnitHp = NULL;
+HWND g_hEditUnitMaxHp = NULL;
+HWND g_hBtnSetUnitHp = NULL;
+HWND g_hBtnHealInTab = NULL;
+
+HWND g_hEditUnitMp = NULL;
+HWND g_hEditUnitMaxMp = NULL;
+HWND g_hBtnSetUnitMp = NULL;
+HWND g_hBtnGodInTab = NULL;
+
+HWND g_hEditUnitStr = NULL;
+HWND g_hBtnAddUnitStr = NULL;
+HWND g_hBtnSetUnitStr = NULL;
+
+HWND g_hEditUnitAgi = NULL;
+HWND g_hBtnAddUnitAgi = NULL;
+HWND g_hBtnSetUnitAgi = NULL;
+
+HWND g_hEditUnitInt = NULL;
+HWND g_hBtnAddUnitInt = NULL;
+HWND g_hBtnSetUnitInt = NULL;
+
+HWND g_hEditUnitSpeed = NULL;
+HWND g_hBtnMaxUnitSpeed = NULL;
+HWND g_hBtnSetUnitSpeed = NULL;
+
+HWND g_hEditUnitDef = NULL;
+HWND g_hBtnSetUnitDef = NULL;
+
+HWND g_hEditUnitExp = NULL;
+HWND g_hBtnAddUnitExp = NULL;
+HWND g_hBtnSetUnitExp = NULL;
+
+HWND g_hCmbResPlayer = NULL;
+HWND g_hEditResGold = NULL;
+HWND g_hBtnAddResGold = NULL;
+HWND g_hBtnSetResGold = NULL;
+HWND g_hEditResLumber = NULL;
+HWND g_hBtnAddResLumber = NULL;
+HWND g_hBtnSetResLumber = NULL;
+
+HWND g_hLblItemSlot[6] = { NULL };
+HWND g_hEditItemSlot[6] = { NULL };
+HWND g_hBtnSetItemSlot[6] = { NULL };
 
 HFONT g_hFont = NULL;
 HFONT g_hFontBold = NULL;
@@ -747,35 +811,129 @@ void LoadExistingSavesFromFile() {
     }
 }
 
-// Toggle visibility between Save Monitor and All Logs tabs
+// Refresh selected unit attributes & player resources in Tab 1
+void RefreshMemoryTab(bool force = false) {
+    if (!g_hWnd) return;
+    HWND hFocus = GetFocus();
+
+    // 1. Refresh Selected Unit
+    UnitInfo info{};
+    bool unitOk = WebController::ReadSelectedUnit(&info);
+    if (unitOk) {
+        wchar_t hdrBuf[256];
+        swprintf_s(hdrBuf, 256, L"選中單位: 0x%08llX | 英雄屬性: 0x%08llX", 
+            (unsigned long long)info.unit, (unsigned long long)info.heroAttributes);
+        if (g_hLblUnitHeader) SetWindowTextW(g_hLblUnitHeader, hdrBuf);
+
+        float hp = 0.0f, maxHp = 0.0f, mp = 0.0f, maxMp = 0.0f, speed = 0.0f, def = 0.0f;
+        int32_t str = 0, agi = 0, intel = 0, exp = 0;
+
+        if (info.hp.valid) WebController::g_memInstance.read(info.hp.address, &hp);
+        if (info.maxHp.valid) WebController::g_memInstance.read(info.maxHp.address, &maxHp);
+        if (info.mp.valid) WebController::g_memInstance.read(info.mp.address, &mp);
+        if (info.maxMp.valid) WebController::g_memInstance.read(info.maxMp.address, &maxMp);
+        if (info.strength.valid) WebController::g_memInstance.read(info.strength.address, &str);
+        if (info.agility.valid) WebController::g_memInstance.read(info.agility.address, &agi);
+        if (info.intelligence.valid) WebController::g_memInstance.read(info.intelligence.address, &intel);
+        if (info.moveSpeed.valid) WebController::g_memInstance.read(info.moveSpeed.address, &speed);
+        if (info.defense.valid) WebController::g_memInstance.read(info.defense.address, &def);
+        if (info.experience.valid) WebController::g_memInstance.read(info.experience.address, &exp);
+
+        auto setEdit = [&](HWND hEdit, const std::wstring& val) {
+            if (hEdit && (force || hFocus != hEdit)) {
+                SetWindowTextW(hEdit, val.c_str());
+            }
+        };
+
+        wchar_t numBuf[64];
+        swprintf_s(numBuf, 64, L"%.0f", hp); setEdit(g_hEditUnitHp, numBuf);
+        swprintf_s(numBuf, 64, L"%.0f", maxHp); setEdit(g_hEditUnitMaxHp, numBuf);
+        swprintf_s(numBuf, 64, L"%.0f", mp); setEdit(g_hEditUnitMp, numBuf);
+        swprintf_s(numBuf, 64, L"%.0f", maxMp); setEdit(g_hEditUnitMaxMp, numBuf);
+        swprintf_s(numBuf, 64, L"%d", str); setEdit(g_hEditUnitStr, numBuf);
+        swprintf_s(numBuf, 64, L"%d", agi); setEdit(g_hEditUnitAgi, numBuf);
+        swprintf_s(numBuf, 64, L"%d", intel); setEdit(g_hEditUnitInt, numBuf);
+        swprintf_s(numBuf, 64, L"%.1f", speed); setEdit(g_hEditUnitSpeed, numBuf);
+        swprintf_s(numBuf, 64, L"%.1f", def); setEdit(g_hEditUnitDef, numBuf);
+        swprintf_s(numBuf, 64, L"%d", exp); setEdit(g_hEditUnitExp, numBuf);
+
+        // Inventory Items
+        for (int i = 0; i < 6; ++i) {
+            bool foundItem = false;
+            for (const auto& it : info.items) {
+                if (it.slot == i) {
+                    foundItem = true;
+                    int32_t chg = 0;
+                    WebController::g_memInstance.read(it.chargesAddress, &chg);
+                    wchar_t slotLbl[64];
+                    swprintf_s(slotLbl, 64, L"格%d(0x%X):", i + 1, (unsigned int)(it.currentItem & 0xFFFF));
+                    if (g_hLblItemSlot[i]) SetWindowTextW(g_hLblItemSlot[i], slotLbl);
+                    swprintf_s(numBuf, 64, L"%d", chg);
+                    setEdit(g_hEditItemSlot[i], numBuf);
+                    break;
+                }
+            }
+            if (!foundItem) {
+                wchar_t slotLbl[64];
+                swprintf_s(slotLbl, 64, L"格%d [空]:", i + 1);
+                if (g_hLblItemSlot[i]) SetWindowTextW(g_hLblItemSlot[i], slotLbl);
+                setEdit(g_hEditItemSlot[i], L"0");
+            }
+        }
+    } else {
+        if (g_hLblUnitHeader) SetWindowTextW(g_hLblUnitHeader, L"未選取單位 (請在魔獸遊戲中點選英雄或單位)");
+    }
+
+    // 2. Refresh Player Resources
+    int curPlayer = 1;
+    if (g_hCmbResPlayer) {
+        int sel = (int)SendMessage(g_hCmbResPlayer, CB_GETCURSEL, 0, 0);
+        if (sel != CB_ERR) curPlayer = sel + 1;
+    }
+
+    int gold = 0, lumber = 0;
+    if (WebController::ReadPlayerResources(curPlayer, &gold, &lumber)) {
+        wchar_t rBuf[64];
+        if (g_hEditResGold && (force || hFocus != g_hEditResGold)) {
+            swprintf_s(rBuf, 64, L"%d", gold);
+            SetWindowTextW(g_hEditResGold, rBuf);
+        }
+        if (g_hEditResLumber && (force || hFocus != g_hEditResLumber)) {
+            swprintf_s(rBuf, 64, L"%d", lumber);
+            SetWindowTextW(g_hEditResLumber, rBuf);
+        }
+    }
+}
+
+// Toggle visibility between Save Monitor (0), Memory Controller (1), and All Logs (2) tabs
 void SwitchMonitorTab() {
     if (!g_hTabMonitor) return;
     int curTab = TabCtrl_GetCurSel(g_hTabMonitor);
-    if (curTab == 0) {
-        ShowWindow(g_hListSaveMonitor, SW_SHOW);
-        ShowWindow(g_hBtnFillSaveInput, SW_SHOW);
-        ShowWindow(g_hBtnCopySaveItem, SW_SHOW);
-        ShowWindow(g_hBtnReloadSave, SW_SHOW);
-        ShowWindow(g_hBtnClearSaveList, SW_SHOW);
+    bool isSaveTab = (curTab == 0);
+    bool isMemTab = (curTab == 1);
+    bool isLogTab = (curTab == 2);
 
-        ShowWindow(g_hEditLog, SW_HIDE);
-        ShowWindow(g_hChkAutoScroll, SW_HIDE);
-        ShowWindow(g_hBtnClearLog, SW_HIDE);
-        ShowWindow(g_hBtnCopyLog, SW_HIDE);
-        ShowWindow(g_hBtnOpenTrace, SW_HIDE);
-    } else {
-        ShowWindow(g_hListSaveMonitor, SW_HIDE);
-        ShowWindow(g_hBtnFillSaveInput, SW_HIDE);
-        ShowWindow(g_hBtnCopySaveItem, SW_HIDE);
-        ShowWindow(g_hBtnReloadSave, SW_HIDE);
-        ShowWindow(g_hBtnClearSaveList, SW_HIDE);
+    // Tab 0: Save Monitor
+    ShowWindow(g_hListSaveMonitor, isSaveTab ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hBtnFillSaveInput, isSaveTab ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hBtnCopySaveItem, isSaveTab ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hBtnReloadSave, isSaveTab ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hBtnClearSaveList, isSaveTab ? SW_SHOW : SW_HIDE);
 
-        ShowWindow(g_hEditLog, SW_SHOW);
-        ShowWindow(g_hChkAutoScroll, SW_SHOW);
-        ShowWindow(g_hBtnClearLog, SW_SHOW);
-        ShowWindow(g_hBtnCopyLog, SW_SHOW);
-        ShowWindow(g_hBtnOpenTrace, SW_SHOW);
+    // Tab 1: Memory Controller
+    for (HWND h : g_memControls) {
+        ShowWindow(h, isMemTab ? SW_SHOW : SW_HIDE);
     }
+    if (isMemTab) {
+        RefreshMemoryTab(true);
+    }
+
+    // Tab 2: Logs
+    ShowWindow(g_hEditLog, isLogTab ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hChkAutoScroll, isLogTab ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hBtnClearLog, isLogTab ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hBtnCopyLog, isLogTab ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hBtnOpenTrace, isLogTab ? SW_SHOW : SW_HIDE);
 }
 
 // Send Single Save Command (Backward compatible or called by UI)
@@ -1187,85 +1345,104 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             30, 316, 820, 18, hWnd, NULL, NULL, NULL);
         SendMessage(hLblHint, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        // 4. Group 4: 原版 JassTool 快捷與終端指令
-        HWND hGrp4 = CreateWindowW(L"BUTTON", L"【原版 JassTool 快捷與指令互動終端】", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            15, 350, 850, 60, hWnd, (HMENU)IDC_GRP_CMD, NULL, NULL);
+        // 4. Group 4: 單位屬性快捷與原版 Jass 指令終端 (Web Controller 記憶體功能)
+        HWND hGrp4 = CreateWindowW(L"BUTTON", L"【單位屬性快捷與原版 Jass 指令終端 (Web Controller 記憶體功能)】", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            15, 350, 850, 95, hWnd, (HMENU)IDC_GRP_CMD, NULL, NULL);
         SendMessage(hGrp4, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
-        HWND hBtnKill = CreateWindowW(L"BUTTON", L"💀 秒殺選中單位 (!kill)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            30, 370, 175, 30, hWnd, (HMENU)IDC_BTN_KILL, NULL, NULL);
+        // Row 1: Quick Action Buttons
+        HWND hBtnKill = CreateWindowW(L"BUTTON", L"💀 秒殺", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            25, 372, 85, 28, hWnd, (HMENU)IDC_BTN_KILL, NULL, NULL);
         SendMessage(hBtnKill, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
+        g_hBtnMemHeal = CreateWindowW(L"BUTTON", L"💖 滿血滿魔", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            115, 372, 95, 28, hWnd, (HMENU)IDC_BTN_MEM_HEAL, NULL, NULL);
+        SendMessage(g_hBtnMemHeal, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
+
+        g_hBtnMemGod = CreateWindowW(L"BUTTON", L"🛡️ 無敵鎖血: 關", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            215, 372, 120, 28, hWnd, (HMENU)IDC_BTN_MEM_GODMODE, NULL, NULL);
+        SendMessage(g_hBtnMemGod, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
+
+        g_hBtnMemSpeed = CreateWindowW(L"BUTTON", L"⚡ 522滿速", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            340, 372, 85, 28, hWnd, (HMENU)IDC_BTN_MEM_SPEED, NULL, NULL);
+        SendMessage(g_hBtnMemSpeed, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
+
+        g_hBtnMemStats = CreateWindowW(L"BUTTON", L"💪 屬性+1000", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            430, 372, 95, 28, hWnd, (HMENU)IDC_BTN_MEM_STATS, NULL, NULL);
+        SendMessage(g_hBtnMemStats, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
+
+        g_hBtnMemGold = CreateWindowW(L"BUTTON", L"💰 金錢+10W", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            530, 372, 95, 28, hWnd, (HMENU)IDC_BTN_MEM_GOLD, NULL, NULL);
+        SendMessage(g_hBtnMemGold, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
+
+        g_hBtnMemLumber = CreateWindowW(L"BUTTON", L"🌲 木材+10W", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            630, 372, 95, 28, hWnd, (HMENU)IDC_BTN_MEM_LUMBER, NULL, NULL);
+        SendMessage(g_hBtnMemLumber, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
+
+        g_hBtnOpenWebUi = CreateWindowW(L"BUTTON", L"🌐 Web 控制台", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            730, 372, 120, 28, hWnd, (HMENU)IDC_BTN_OPEN_WEB_UI, NULL, NULL);
+        SendMessage(g_hBtnOpenWebUi, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
+
+        // Row 2: Jass Terminal Command
         HWND hLblCmd = CreateWindowW(L"STATIC", L"Jass 指令:", WS_CHILD | WS_VISIBLE | SS_LEFT,
-            215, 374, 70, 20, hWnd, NULL, NULL, NULL);
+            25, 412, 70, 20, hWnd, NULL, NULL, NULL);
         SendMessage(hLblCmd, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
         g_hEditCmd = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-            290, 371, 430, 26, hWnd, (HMENU)IDC_EDIT_CMD, NULL, NULL);
+            100, 409, 620, 26, hWnd, (HMENU)IDC_EDIT_CMD, NULL, NULL);
         SendMessage(g_hEditCmd, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         g_oldEditCmdProc = (WNDPROC)SetWindowLongPtr(g_hEditCmd, GWLP_WNDPROC, (LONG_PTR)EditCmdSubclassProc);
 
         HWND hBtnSend = CreateWindowW(L"BUTTON", L"發送指令", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            730, 369, 120, 30, hWnd, (HMENU)IDC_BTN_SEND_CMD, NULL, NULL);
+            730, 408, 120, 28, hWnd, (HMENU)IDC_BTN_SEND_CMD, NULL, NULL);
         SendMessage(hBtnSend, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        // 5. Group 5: 即時監控中心 (Live Monitor Center)
-        HWND hGrp5 = CreateWindowW(L"BUTTON", L"【即時監控中心 (Live Monitor)】", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            15, 415, 850, 300, hWnd, (HMENU)IDC_GRP_LOG, NULL, NULL);
+        // 5. Group 5: 即時監控與記憶體控制器 (Live Monitor & Controller)
+        HWND hGrp5 = CreateWindowW(L"BUTTON", L"【即時監控與記憶體控制器 (Live Monitor & Controller)】", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            15, 452, 850, 310, hWnd, (HMENU)IDC_GRP_LOG, NULL, NULL);
         SendMessage(hGrp5, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
         // Tab Control for Monitor
         g_hTabMonitor = CreateWindowW(WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-            30, 435, 340, 28, hWnd, (HMENU)IDC_TAB_MONITOR, NULL, NULL);
+            30, 472, 420, 28, hWnd, (HMENU)IDC_TAB_MONITOR, NULL, NULL);
         SendMessage(g_hTabMonitor, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
         TCITEMW tci0{};
         tci0.mask = TCIF_TEXT;
         tci0.pszText = (LPWSTR)L"💾 存檔即時監控 (0 筆)";
         TabCtrl_InsertItemW_Helper(g_hTabMonitor, 0, &tci0);
+
         TCITEMW tci1{};
         tci1.mask = TCIF_TEXT;
-        tci1.pszText = (LPWSTR)L"📜 全部串流日誌";
+        tci1.pszText = (LPWSTR)L"⚔️ 英雄與記憶體控制";
         TabCtrl_InsertItemW_Helper(g_hTabMonitor, 1, &tci1);
+
+        TCITEMW tci2{};
+        tci2.mask = TCIF_TEXT;
+        tci2.pszText = (LPWSTR)L"📜 全部串流日誌";
+        TabCtrl_InsertItemW_Helper(g_hTabMonitor, 2, &tci2);
 
         // Save Monitor Toolbar Buttons (Tab 0)
         g_hBtnFillSaveInput = CreateWindowW(L"BUTTON", L"✏️ 填入輸入框", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            380, 435, 120, 26, hWnd, (HMENU)IDC_BTN_FILL_SAVE_INPUT, NULL, NULL);
+            460, 472, 105, 26, hWnd, (HMENU)IDC_BTN_FILL_SAVE_INPUT, NULL, NULL);
         SendMessage(g_hBtnFillSaveInput, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        g_hBtnCopySaveItem = CreateWindowW(L"BUTTON", L"📋 複製格式 (P:K=V)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            508, 435, 145, 26, hWnd, (HMENU)IDC_BTN_COPY_SAVE_ITEM, NULL, NULL);
+        g_hBtnCopySaveItem = CreateWindowW(L"BUTTON", L"📋 複製格式", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            570, 472, 115, 26, hWnd, (HMENU)IDC_BTN_COPY_SAVE_ITEM, NULL, NULL);
         SendMessage(g_hBtnCopySaveItem, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        g_hBtnReloadSave = CreateWindowW(L"BUTTON", L"🔄 重新讀取存檔", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            660, 435, 115, 26, hWnd, (HMENU)IDC_BTN_RELOAD_SAVE, NULL, NULL);
+        g_hBtnReloadSave = CreateWindowW(L"BUTTON", L"🔄 重新讀取", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            690, 472, 95, 26, hWnd, (HMENU)IDC_BTN_RELOAD_SAVE, NULL, NULL);
         SendMessage(g_hBtnReloadSave, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        g_hBtnClearSaveList = CreateWindowW(L"BUTTON", L"清空清單", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            782, 435, 68, 26, hWnd, (HMENU)IDC_BTN_CLEAR_SAVE_LIST, NULL, NULL);
+        g_hBtnClearSaveList = CreateWindowW(L"BUTTON", L"清空", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            790, 472, 60, 26, hWnd, (HMENU)IDC_BTN_CLEAR_SAVE_LIST, NULL, NULL);
         SendMessage(g_hBtnClearSaveList, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-
-        // General Log Toolbar Buttons (Tab 1, initially hidden)
-        g_hChkAutoScroll = CreateWindowW(L"BUTTON", L"自動滾動", WS_CHILD | BS_AUTOCHECKBOX,
-            420, 438, 90, 20, hWnd, (HMENU)IDC_CHK_AUTO_SCROLL, NULL, NULL);
-        SendMessage(g_hChkAutoScroll, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-        SendMessage(g_hChkAutoScroll, BM_SETCHECK, BST_CHECKED, 0);
-
-        g_hBtnClearLog = CreateWindowW(L"BUTTON", L"清空日誌", WS_CHILD | BS_PUSHBUTTON,
-            520, 435, 95, 26, hWnd, (HMENU)IDC_BTN_CLEAR_LOG, NULL, NULL);
-        SendMessage(g_hBtnClearLog, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-
-        g_hBtnCopyLog = CreateWindowW(L"BUTTON", L"複製日誌", WS_CHILD | BS_PUSHBUTTON,
-            625, 435, 95, 26, hWnd, (HMENU)IDC_BTN_COPY_LOG, NULL, NULL);
-        SendMessage(g_hBtnCopyLog, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-
-        g_hBtnOpenTrace = CreateWindowW(L"BUTTON", L"開啟 dztrace.log", WS_CHILD | BS_PUSHBUTTON,
-            730, 435, 120, 26, hWnd, (HMENU)IDC_BTN_OPEN_TRACE, NULL, NULL);
-        SendMessage(g_hBtnOpenTrace, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
         // Save Monitor ListView (Tab 0)
         g_hListSaveMonitor = CreateWindowW(WC_LISTVIEWW, L"",
             WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_VSCROLL,
-            30, 466, 820, 238, hWnd, (HMENU)IDC_LIST_SAVE_MONITOR, NULL, NULL);
+            30, 502, 820, 250, hWnd, (HMENU)IDC_LIST_SAVE_MONITOR, NULL, NULL);
         SendMessage(g_hListSaveMonitor, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         ListView_SetExtendedListViewStyle(g_hListSaveMonitor, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
 
@@ -1287,11 +1464,138 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         lvc.iSubItem = 4; lvc.pszText = (LPWSTR)L"數值 (Value)"; lvc.cx = 305;
         ListView_InsertColumnW_Helper(g_hListSaveMonitor, 4, &lvc);
 
-        // All Logs EditBox (Tab 1, initially hidden)
+        // General Log Toolbar Buttons (Tab 2, initially hidden)
+        g_hChkAutoScroll = CreateWindowW(L"BUTTON", L"自動滾動", WS_CHILD | BS_AUTOCHECKBOX,
+            460, 474, 90, 20, hWnd, (HMENU)IDC_CHK_AUTO_SCROLL, NULL, NULL);
+        SendMessage(g_hChkAutoScroll, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        SendMessage(g_hChkAutoScroll, BM_SETCHECK, BST_CHECKED, 0);
+
+        g_hBtnClearLog = CreateWindowW(L"BUTTON", L"清空日誌", WS_CHILD | BS_PUSHBUTTON,
+            555, 472, 85, 26, hWnd, (HMENU)IDC_BTN_CLEAR_LOG, NULL, NULL);
+        SendMessage(g_hBtnClearLog, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
+        g_hBtnCopyLog = CreateWindowW(L"BUTTON", L"複製日誌", WS_CHILD | BS_PUSHBUTTON,
+            645, 472, 85, 26, hWnd, (HMENU)IDC_BTN_COPY_LOG, NULL, NULL);
+        SendMessage(g_hBtnCopyLog, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
+        g_hBtnOpenTrace = CreateWindowW(L"BUTTON", L"開啟 dztrace.log", WS_CHILD | BS_PUSHBUTTON,
+            735, 472, 115, 26, hWnd, (HMENU)IDC_BTN_OPEN_TRACE, NULL, NULL);
+        SendMessage(g_hBtnOpenTrace, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
+        // All Logs EditBox (Tab 2, initially hidden)
         g_hEditLog = CreateWindowW(L"EDIT", L"",
             WS_CHILD | WS_BORDER | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-            30, 466, 820, 238, hWnd, (HMENU)IDC_EDIT_LOG, NULL, NULL);
+            30, 502, 820, 250, hWnd, (HMENU)IDC_EDIT_LOG, NULL, NULL);
         SendMessage(g_hEditLog, WM_SETFONT, (WPARAM)g_hFontConsole, TRUE);
+
+        // -------------------------------------------------------------
+        // Tab 1: Memory Controller Controls (Initially Hidden)
+        // -------------------------------------------------------------
+        g_memControls.clear();
+
+        auto addMemCtrl = [&](HWND h) {
+            if (h) {
+                SendMessage(h, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+                g_memControls.push_back(h);
+            }
+            return h;
+        };
+
+        // Header and Scan Toolbar
+        g_hLblUnitHeader = addMemCtrl(CreateWindowW(L"STATIC", L"未選取單位 (請在魔獸遊戲中點選英雄或單位)", WS_CHILD | SS_LEFT,
+            35, 506, 430, 20, hWnd, NULL, NULL, NULL));
+        g_hBtnMemScan = addMemCtrl(CreateWindowW(L"BUTTON", L"🔍 重新掃描單位", WS_CHILD | BS_PUSHBUTTON,
+            470, 502, 110, 26, hWnd, (HMENU)IDC_BTN_MEM_SCAN, NULL, NULL));
+        g_hBtnMemScanRes = addMemCtrl(CreateWindowW(L"BUTTON", L"💰 重新掃描資源", WS_CHILD | BS_PUSHBUTTON,
+            585, 502, 110, 26, hWnd, (HMENU)IDC_BTN_MEM_SCAN_RES, NULL, NULL));
+        g_hBtnWebUiInTab = addMemCtrl(CreateWindowW(L"BUTTON", L"🌐 開啟 Web 控制面板", WS_CHILD | BS_PUSHBUTTON,
+            700, 502, 150, 26, hWnd, (HMENU)IDC_BTN_OPEN_WEB_UI, NULL, NULL));
+
+        // Left Column: Hero & Unit Attributes
+        addMemCtrl(CreateWindowW(L"STATIC", L"HP 當前/最大:", WS_CHILD | SS_LEFT, 35, 536, 92, 20, hWnd, NULL, NULL, NULL));
+        g_hEditUnitHp = addMemCtrl(CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_BORDER | ES_CENTER | ES_NUMBER, 130, 534, 58, 22, hWnd, (HMENU)IDC_EDIT_UNIT_HP, NULL, NULL));
+        addMemCtrl(CreateWindowW(L"STATIC", L"/", WS_CHILD | SS_CENTER, 190, 536, 10, 20, hWnd, NULL, NULL, NULL));
+        g_hEditUnitMaxHp = addMemCtrl(CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_BORDER | ES_CENTER | ES_NUMBER, 202, 534, 58, 22, hWnd, (HMENU)IDC_EDIT_UNIT_MAXHP, NULL, NULL));
+        g_hBtnSetUnitHp = addMemCtrl(CreateWindowW(L"BUTTON", L"設HP", WS_CHILD | BS_PUSHBUTTON, 265, 533, 55, 24, hWnd, (HMENU)IDC_BTN_SET_HP, NULL, NULL));
+        g_hBtnHealInTab = addMemCtrl(CreateWindowW(L"BUTTON", L"滿血滿魔", WS_CHILD | BS_PUSHBUTTON, 325, 533, 75, 24, hWnd, (HMENU)IDC_BTN_MEM_HEAL, NULL, NULL));
+
+        addMemCtrl(CreateWindowW(L"STATIC", L"MP 當前/最大:", WS_CHILD | SS_LEFT, 35, 564, 92, 20, hWnd, NULL, NULL, NULL));
+        g_hEditUnitMp = addMemCtrl(CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_BORDER | ES_CENTER | ES_NUMBER, 130, 562, 58, 22, hWnd, (HMENU)IDC_EDIT_UNIT_MP, NULL, NULL));
+        addMemCtrl(CreateWindowW(L"STATIC", L"/", WS_CHILD | SS_CENTER, 190, 564, 10, 20, hWnd, NULL, NULL, NULL));
+        g_hEditUnitMaxMp = addMemCtrl(CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_BORDER | ES_CENTER | ES_NUMBER, 202, 562, 58, 22, hWnd, (HMENU)IDC_EDIT_UNIT_MAXMP, NULL, NULL));
+        g_hBtnSetUnitMp = addMemCtrl(CreateWindowW(L"BUTTON", L"設MP", WS_CHILD | BS_PUSHBUTTON, 265, 561, 55, 24, hWnd, (HMENU)IDC_BTN_SET_MP, NULL, NULL));
+        g_hBtnGodInTab = addMemCtrl(CreateWindowW(L"BUTTON", L"無敵鎖血", WS_CHILD | BS_PUSHBUTTON, 325, 561, 75, 24, hWnd, (HMENU)IDC_BTN_MEM_GODMODE, NULL, NULL));
+
+        addMemCtrl(CreateWindowW(L"STATIC", L"英雄力量:", WS_CHILD | SS_LEFT, 35, 592, 90, 20, hWnd, NULL, NULL, NULL));
+        g_hEditUnitStr = addMemCtrl(CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_BORDER | ES_CENTER | ES_NUMBER, 130, 590, 75, 22, hWnd, (HMENU)IDC_EDIT_UNIT_STR, NULL, NULL));
+        g_hBtnAddUnitStr = addMemCtrl(CreateWindowW(L"BUTTON", L"+1000", WS_CHILD | BS_PUSHBUTTON, 212, 589, 58, 24, hWnd, (HMENU)IDC_BTN_MEM_STATS, NULL, NULL));
+        g_hBtnSetUnitStr = addMemCtrl(CreateWindowW(L"BUTTON", L"設定", WS_CHILD | BS_PUSHBUTTON, 275, 589, 45, 24, hWnd, (HMENU)IDC_BTN_SET_STR, NULL, NULL));
+
+        addMemCtrl(CreateWindowW(L"STATIC", L"英雄敏捷:", WS_CHILD | SS_LEFT, 35, 620, 90, 20, hWnd, NULL, NULL, NULL));
+        g_hEditUnitAgi = addMemCtrl(CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_BORDER | ES_CENTER | ES_NUMBER, 130, 618, 75, 22, hWnd, (HMENU)IDC_EDIT_UNIT_AGI, NULL, NULL));
+        g_hBtnAddUnitAgi = addMemCtrl(CreateWindowW(L"BUTTON", L"+1000", WS_CHILD | BS_PUSHBUTTON, 212, 617, 58, 24, hWnd, (HMENU)IDC_BTN_MEM_STATS, NULL, NULL));
+        g_hBtnSetUnitAgi = addMemCtrl(CreateWindowW(L"BUTTON", L"設定", WS_CHILD | BS_PUSHBUTTON, 275, 617, 45, 24, hWnd, (HMENU)IDC_BTN_SET_AGI, NULL, NULL));
+
+        addMemCtrl(CreateWindowW(L"STATIC", L"英雄智力:", WS_CHILD | SS_LEFT, 35, 648, 90, 20, hWnd, NULL, NULL, NULL));
+        g_hEditUnitInt = addMemCtrl(CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_BORDER | ES_CENTER | ES_NUMBER, 130, 646, 75, 22, hWnd, (HMENU)IDC_EDIT_UNIT_INT, NULL, NULL));
+        g_hBtnAddUnitInt = addMemCtrl(CreateWindowW(L"BUTTON", L"+1000", WS_CHILD | BS_PUSHBUTTON, 212, 645, 58, 24, hWnd, (HMENU)IDC_BTN_MEM_STATS, NULL, NULL));
+        g_hBtnSetUnitInt = addMemCtrl(CreateWindowW(L"BUTTON", L"設定", WS_CHILD | BS_PUSHBUTTON, 275, 645, 45, 24, hWnd, (HMENU)IDC_BTN_SET_INT, NULL, NULL));
+
+        addMemCtrl(CreateWindowW(L"STATIC", L"移動速度:", WS_CHILD | SS_LEFT, 35, 676, 90, 20, hWnd, NULL, NULL, NULL));
+        g_hEditUnitSpeed = addMemCtrl(CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_BORDER | ES_CENTER, 130, 674, 75, 22, hWnd, (HMENU)IDC_EDIT_UNIT_SPEED, NULL, NULL));
+        g_hBtnMaxUnitSpeed = addMemCtrl(CreateWindowW(L"BUTTON", L"522滿速", WS_CHILD | BS_PUSHBUTTON, 212, 673, 62, 24, hWnd, (HMENU)IDC_BTN_MEM_SPEED, NULL, NULL));
+        g_hBtnSetUnitSpeed = addMemCtrl(CreateWindowW(L"BUTTON", L"設定", WS_CHILD | BS_PUSHBUTTON, 280, 673, 45, 24, hWnd, (HMENU)IDC_BTN_SET_SPEED, NULL, NULL));
+
+        addMemCtrl(CreateWindowW(L"STATIC", L"防禦:", WS_CHILD | SS_LEFT, 35, 704, 35, 20, hWnd, NULL, NULL, NULL));
+        g_hEditUnitDef = addMemCtrl(CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_BORDER | ES_CENTER, 72, 702, 55, 22, hWnd, (HMENU)IDC_EDIT_UNIT_DEF, NULL, NULL));
+        g_hBtnSetUnitDef = addMemCtrl(CreateWindowW(L"BUTTON", L"設防", WS_CHILD | BS_PUSHBUTTON, 130, 701, 45, 24, hWnd, (HMENU)IDC_BTN_SET_DEF, NULL, NULL));
+        addMemCtrl(CreateWindowW(L"STATIC", L"經驗:", WS_CHILD | SS_LEFT, 180, 704, 35, 20, hWnd, NULL, NULL, NULL));
+        g_hEditUnitExp = addMemCtrl(CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_BORDER | ES_CENTER | ES_NUMBER, 218, 702, 65, 22, hWnd, (HMENU)IDC_EDIT_UNIT_EXP, NULL, NULL));
+        g_hBtnAddUnitExp = addMemCtrl(CreateWindowW(L"BUTTON", L"+1萬", WS_CHILD | BS_PUSHBUTTON, 288, 701, 50, 24, hWnd, (HMENU)IDC_BTN_SET_EXP, NULL, NULL));
+        g_hBtnSetUnitExp = addMemCtrl(CreateWindowW(L"BUTTON", L"設定", WS_CHILD | BS_PUSHBUTTON, 342, 701, 45, 24, hWnd, (HMENU)IDC_BTN_SET_EXP, NULL, NULL));
+
+        // Right Column: Player Resources & Inventory
+        addMemCtrl(CreateWindowW(L"STATIC", L"玩家:", WS_CHILD | SS_LEFT, 440, 536, 40, 20, hWnd, NULL, NULL, NULL));
+        g_hCmbResPlayer = addMemCtrl(CreateWindowW(L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL, 485, 533, 90, 160, hWnd, (HMENU)IDC_CMB_RES_PLAYER, NULL, NULL));
+        for (int p = 1; p <= 12; ++p) {
+            std::wstring pStr = L"玩家 " + std::to_wstring(p);
+            SendMessageW(g_hCmbResPlayer, CB_ADDSTRING, 0, (LPARAM)pStr.c_str());
+        }
+        SendMessage(g_hCmbResPlayer, CB_SETCURSEL, 0, 0);
+
+        addMemCtrl(CreateWindowW(L"STATIC", L"金錢:", WS_CHILD | SS_LEFT, 585, 536, 40, 20, hWnd, NULL, NULL, NULL));
+        g_hEditResGold = addMemCtrl(CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_BORDER | ES_CENTER | ES_NUMBER, 630, 534, 75, 22, hWnd, (HMENU)IDC_EDIT_RES_GOLD, NULL, NULL));
+        g_hBtnAddResGold = addMemCtrl(CreateWindowW(L"BUTTON", L"+10W", WS_CHILD | BS_PUSHBUTTON, 710, 533, 50, 24, hWnd, (HMENU)IDC_BTN_ADD_RES_GOLD, NULL, NULL));
+        g_hBtnSetResGold = addMemCtrl(CreateWindowW(L"BUTTON", L"設定", WS_CHILD | BS_PUSHBUTTON, 765, 533, 45, 24, hWnd, (HMENU)IDC_BTN_SET_RES_GOLD, NULL, NULL));
+
+        addMemCtrl(CreateWindowW(L"STATIC", L"木材:", WS_CHILD | SS_LEFT, 585, 564, 40, 20, hWnd, NULL, NULL, NULL));
+        g_hEditResLumber = addMemCtrl(CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_BORDER | ES_CENTER | ES_NUMBER, 630, 562, 75, 22, hWnd, (HMENU)IDC_EDIT_RES_LUMBER, NULL, NULL));
+        g_hBtnAddResLumber = addMemCtrl(CreateWindowW(L"BUTTON", L"+10W", WS_CHILD | BS_PUSHBUTTON, 710, 561, 50, 24, hWnd, (HMENU)IDC_BTN_ADD_RES_LUMBER, NULL, NULL));
+        g_hBtnSetResLumber = addMemCtrl(CreateWindowW(L"BUTTON", L"設定", WS_CHILD | BS_PUSHBUTTON, 765, 561, 45, 24, hWnd, (HMENU)IDC_BTN_SET_RES_LUMBER, NULL, NULL));
+
+        // 6 Inventory Slots
+        struct SlotPos { int lx, ly, ex, ey, bx, by; };
+        SlotPos sp[6] = {
+            { 440, 592, 535, 590, 580, 589 },
+            { 635, 592, 730, 590, 775, 589 },
+            { 440, 620, 535, 618, 580, 617 },
+            { 635, 620, 730, 618, 775, 617 },
+            { 440, 648, 535, 646, 580, 645 },
+            { 635, 648, 730, 646, 775, 645 }
+        };
+
+        for (int i = 0; i < 6; ++i) {
+            std::wstring slotName = L"格" + std::to_wstring(i + 1) + L" [空]:";
+            g_hLblItemSlot[i] = addMemCtrl(CreateWindowW(L"STATIC", slotName.c_str(), WS_CHILD | SS_LEFT,
+                sp[i].lx, sp[i].ly, 90, 20, hWnd, NULL, NULL, NULL));
+            g_hEditItemSlot[i] = addMemCtrl(CreateWindowW(L"EDIT", L"0", WS_CHILD | WS_BORDER | ES_CENTER | ES_NUMBER,
+                sp[i].ex, sp[i].ey, 40, 22, hWnd, (HMENU)(IDC_EDIT_ITEM_SLOT0 + i), NULL, NULL));
+            g_hBtnSetItemSlot[i] = addMemCtrl(CreateWindowW(L"BUTTON", L"設定", WS_CHILD | BS_PUSHBUTTON,
+                sp[i].bx, sp[i].by, 40, 24, hWnd, (HMENU)(IDC_BTN_SET_ITEM_SLOT0 + i), NULL, NULL));
+        }
+
+        addMemCtrl(CreateWindowW(L"STATIC", L"💡 提示: 在魔獸中選取任何單位後點擊「重新掃描」，即可直接修改生命/屬性/移速/物品或開啟 Web UI！", WS_CHILD | SS_LEFT,
+            440, 680, 400, 45, hWnd, NULL, NULL, NULL));
 
         // Ensure Tab 0 visibility is active
         SwitchMonitorTab();
@@ -1311,6 +1615,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     case WM_TIMER: {
         if (wParam == IDT_TIMER_STATUS) {
             UpdateStatus();
+            if (WebController::IsGodModeActive()) {
+                WebController::TickGodMode();
+            }
+            if (g_hTabMonitor && TabCtrl_GetCurSel(g_hTabMonitor) == 1) {
+                RefreshMemoryTab(false);
+            }
         }
         break;
     }
@@ -1340,6 +1650,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
     case WM_COMMAND: {
         int id = LOWORD(wParam);
+
+        if (id == IDC_CMB_RES_PLAYER && HIWORD(wParam) == CBN_SELCHANGE) {
+            RefreshMemoryTab(true);
+            break;
+        }
 
         switch (id) {
         case IDC_BTN_INJECT:
@@ -1484,13 +1799,231 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             }
             break;
 
-        case IDC_BTN_KILL:
-            if (SendPipeCommand("KILL")) {
-                AppendLog(L"[+] 已發送秒殺選中單位指令 (KILL)");
+        case IDC_BTN_KILL: {
+            bool pipeSent = SendPipeCommand("KILL");
+            bool memKilled = WebController::WriteUnitStat("hp", 0.0f);
+            if (pipeSent || memKilled) {
+                AppendLog(L"[+] 已秒殺選中單位！(IPC + 記憶體雙重執行)");
+                RefreshMemoryTab(true);
             } else {
-                AppendLog(L"[-] 發送失敗，未連線至魔獸。");
+                AppendLog(L"[-] 秒殺失敗: 未連線至魔獸或未選中單位。");
             }
             break;
+        }
+
+        case IDC_BTN_MEM_HEAL: {
+            if (WebController::HealSelectedUnit()) {
+                AppendLog(L"[WebController] 💖 滿血滿魔成功！");
+                RefreshMemoryTab(true);
+            } else {
+                AppendLog(L"[-] 滿血滿魔失敗: 請確認已在魔獸中選取英雄/單位。");
+            }
+            break;
+        }
+
+        case IDC_BTN_MEM_GODMODE: {
+            bool newGod = !WebController::IsGodModeActive();
+            WebController::SetGodMode(newGod);
+            std::wstring godText = newGod ? L"🛡️ 無敵鎖血: 開" : L"🛡️ 無敵鎖血: 關";
+            if (g_hBtnMemGod) SetWindowTextW(g_hBtnMemGod, godText.c_str());
+            if (g_hBtnGodInTab) SetWindowTextW(g_hBtnGodInTab, newGod ? L"鎖血中 (開)" : L"無敵鎖血");
+            AppendLog(L"[WebController] 無敵鎖血模式: " + (newGod ? std::wstring(L"開啟 (持續自動鎖定 HP/MP)") : std::wstring(L"關閉")));
+            break;
+        }
+
+        case IDC_BTN_MEM_SPEED: {
+            if (WebController::SetSelectedUnitMaxSpeed()) {
+                AppendLog(L"[WebController] ⚡ 已設定選中單位移動速度為 522 滿速！");
+                RefreshMemoryTab(true);
+            } else {
+                AppendLog(L"[-] 移速設定失敗: 請確認已在魔獸中選取單位。");
+            }
+            break;
+        }
+
+        case IDC_BTN_MEM_STATS: {
+            if (WebController::AddSelectedUnitStats(1000, 1000, 1000)) {
+                AppendLog(L"[WebController] 💪 選中英雄力量、敏捷、智力各增加 +1000！");
+                RefreshMemoryTab(true);
+            } else {
+                AppendLog(L"[-] 屬性增加失敗: 請確認已選取英雄單位。");
+            }
+            break;
+        }
+
+        case IDC_BTN_MEM_GOLD: {
+            int curP = 1;
+            if (g_hCmbResPlayer) {
+                int sel = (int)SendMessage(g_hCmbResPlayer, CB_GETCURSEL, 0, 0);
+                if (sel != CB_ERR) curP = sel + 1;
+            }
+            if (WebController::AddPlayerGoldLumber(curP, 100000, 0)) {
+                AppendLog(L"[WebController] 💰 玩家 " + std::to_wstring(curP) + L" 金錢增加 +100,000！");
+                RefreshMemoryTab(true);
+            } else {
+                AppendLog(L"[-] 金錢增加失敗，請確認已進入遊戲。");
+            }
+            break;
+        }
+
+        case IDC_BTN_MEM_LUMBER: {
+            int curP = 1;
+            if (g_hCmbResPlayer) {
+                int sel = (int)SendMessage(g_hCmbResPlayer, CB_GETCURSEL, 0, 0);
+                if (sel != CB_ERR) curP = sel + 1;
+            }
+            if (WebController::AddPlayerGoldLumber(curP, 0, 100000)) {
+                AppendLog(L"[WebController] 🌲 玩家 " + std::to_wstring(curP) + L" 木材增加 +100,000！");
+                RefreshMemoryTab(true);
+            } else {
+                AppendLog(L"[-] 木材增加失敗，請確認已進入遊戲。");
+            }
+            break;
+        }
+
+        case IDC_BTN_OPEN_WEB_UI: {
+            WebController::OpenWebControllerInBrowser(8088);
+            AppendLog(L"[WebController] 🌐 已啟動 Web 控制台並在瀏覽器開啟: http://127.0.0.1:8088/");
+            break;
+        }
+
+        case IDC_BTN_MEM_SCAN: {
+            RefreshMemoryTab(true);
+            AppendLog(L"[WebController] 🔍 重新掃描單位完成");
+            break;
+        }
+
+        case IDC_BTN_MEM_SCAN_RES: {
+            RefreshMemoryTab(true);
+            AppendLog(L"[WebController] 💰 重新掃描資源完成");
+            break;
+        }
+
+        case IDC_BTN_SET_HP: {
+            wchar_t hpBuf[64], maxHpBuf[64];
+            GetWindowTextW(g_hEditUnitHp, hpBuf, 64);
+            GetWindowTextW(g_hEditUnitMaxHp, maxHpBuf, 64);
+            float hpVal = (float)_wtof(hpBuf);
+            float maxHpVal = (float)_wtof(maxHpBuf);
+            if (maxHpVal > 0.0f) WebController::WriteUnitStat("maxHp", maxHpVal);
+            if (hpVal > 0.0f) WebController::WriteUnitStat("hp", hpVal);
+            RefreshMemoryTab(true);
+            AppendLog(L"[WebController] 已設定 HP 為 " + std::wstring(hpBuf) + L" / " + std::wstring(maxHpBuf));
+            break;
+        }
+
+        case IDC_BTN_SET_MP: {
+            wchar_t mpBuf[64], maxMpBuf[64];
+            GetWindowTextW(g_hEditUnitMp, mpBuf, 64);
+            GetWindowTextW(g_hEditUnitMaxMp, maxMpBuf, 64);
+            float mpVal = (float)_wtof(mpBuf);
+            float maxMpVal = (float)_wtof(maxMpBuf);
+            if (maxMpVal > 0.0f) WebController::WriteUnitStat("maxMp", maxMpVal);
+            if (mpVal >= 0.0f) WebController::WriteUnitStat("mp", mpVal);
+            RefreshMemoryTab(true);
+            AppendLog(L"[WebController] 已設定 MP 為 " + std::wstring(mpBuf) + L" / " + std::wstring(maxMpBuf));
+            break;
+        }
+
+        case IDC_BTN_SET_STR: {
+            wchar_t buf[64];
+            GetWindowTextW(g_hEditUnitStr, buf, 64);
+            WebController::WriteUnitStat("strength", (float)_wtoi(buf));
+            RefreshMemoryTab(true);
+            AppendLog(L"[WebController] 已設定力量為 " + std::wstring(buf));
+            break;
+        }
+
+        case IDC_BTN_SET_AGI: {
+            wchar_t buf[64];
+            GetWindowTextW(g_hEditUnitAgi, buf, 64);
+            WebController::WriteUnitStat("agility", (float)_wtoi(buf));
+            RefreshMemoryTab(true);
+            AppendLog(L"[WebController] 已設定敏捷為 " + std::wstring(buf));
+            break;
+        }
+
+        case IDC_BTN_SET_INT: {
+            wchar_t buf[64];
+            GetWindowTextW(g_hEditUnitInt, buf, 64);
+            WebController::WriteUnitStat("intelligence", (float)_wtoi(buf));
+            RefreshMemoryTab(true);
+            AppendLog(L"[WebController] 已設定智力為 " + std::wstring(buf));
+            break;
+        }
+
+        case IDC_BTN_SET_SPEED: {
+            wchar_t buf[64];
+            GetWindowTextW(g_hEditUnitSpeed, buf, 64);
+            WebController::WriteUnitStat("moveSpeed", (float)_wtof(buf));
+            RefreshMemoryTab(true);
+            AppendLog(L"[WebController] 已設定移動速度為 " + std::wstring(buf));
+            break;
+        }
+
+        case IDC_BTN_SET_DEF: {
+            wchar_t buf[64];
+            GetWindowTextW(g_hEditUnitDef, buf, 64);
+            WebController::WriteUnitStat("defense", (float)_wtof(buf));
+            RefreshMemoryTab(true);
+            AppendLog(L"[WebController] 已設定防禦值為 " + std::wstring(buf));
+            break;
+        }
+
+        case IDC_BTN_SET_EXP: {
+            wchar_t buf[64];
+            GetWindowTextW(g_hEditUnitExp, buf, 64);
+            WebController::WriteUnitStat("experience", (float)_wtoi(buf));
+            RefreshMemoryTab(true);
+            AppendLog(L"[WebController] 已設定經驗值為 " + std::wstring(buf));
+            break;
+        }
+
+        case IDC_BTN_SET_RES_GOLD: {
+            int curP = 1;
+            if (g_hCmbResPlayer) {
+                int sel = (int)SendMessage(g_hCmbResPlayer, CB_GETCURSEL, 0, 0);
+                if (sel != CB_ERR) curP = sel + 1;
+            }
+            wchar_t buf[64];
+            GetWindowTextW(g_hEditResGold, buf, 64);
+            int val = _wtoi(buf);
+            WebController::WritePlayerResource(curP, "gold", val);
+            RefreshMemoryTab(true);
+            AppendLog(L"[WebController] 玩家 " + std::to_wstring(curP) + L" 金錢設定為 " + std::wstring(buf));
+            break;
+        }
+
+        case IDC_BTN_SET_RES_LUMBER: {
+            int curP = 1;
+            if (g_hCmbResPlayer) {
+                int sel = (int)SendMessage(g_hCmbResPlayer, CB_GETCURSEL, 0, 0);
+                if (sel != CB_ERR) curP = sel + 1;
+            }
+            wchar_t buf[64];
+            GetWindowTextW(g_hEditResLumber, buf, 64);
+            int val = _wtoi(buf);
+            WebController::WritePlayerResource(curP, "lumber", val);
+            RefreshMemoryTab(true);
+            AppendLog(L"[WebController] 玩家 " + std::to_wstring(curP) + L" 木材設定為 " + std::wstring(buf));
+            break;
+        }
+
+        case IDC_BTN_SET_ITEM_SLOT0:
+        case IDC_BTN_SET_ITEM_SLOT1:
+        case IDC_BTN_SET_ITEM_SLOT2:
+        case IDC_BTN_SET_ITEM_SLOT3:
+        case IDC_BTN_SET_ITEM_SLOT4:
+        case IDC_BTN_SET_ITEM_SLOT5: {
+            int slot = id - IDC_BTN_SET_ITEM_SLOT0;
+            wchar_t buf[64];
+            GetWindowTextW(g_hEditItemSlot[slot], buf, 64);
+            int chg = _wtoi(buf);
+            WebController::WriteUnitItemCharges(slot, chg);
+            RefreshMemoryTab(true);
+            AppendLog(L"[WebController] 物品欄格 " + std::to_wstring(slot + 1) + L" 次數已修改為 " + std::wstring(buf));
+            break;
+        }
 
         case IDC_BTN_SEND_CMD: {
             wchar_t buf[512];
@@ -1572,6 +2105,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             CloseHandle(g_hBatchReadThread);
             g_hBatchReadThread = NULL;
         }
+        WebController::StopWebControllerServer();
+        WebController::CleanupMemoryController();
         DisconnectPipe();
         if (g_hLogBrush) DeleteObject(g_hLogBrush);
         if (g_hFont) DeleteObject(g_hFont);
@@ -1609,7 +2144,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 1;
     }
 
-    RECT rc = { 0, 0, 880, 750 };
+    RECT rc = { 0, 0, 880, 790 };
     AdjustWindowRect(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
     int winW = rc.right - rc.left;
     int winH = rc.bottom - rc.top;
@@ -1621,7 +2156,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     g_hWnd = CreateWindowW(
         L"War3DevToolUIClass",
-        L"魔獸爭霸 III JASS 開發者整合控制面板 (War3DevTool v2.1)",
+        L"魔獸爭霸 III JASS 開發者整合控制面板 (War3DevTool v2.2 - 整合 Web Controller)",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         posX, posY, winW, winH,
         NULL, NULL, hInstance, NULL);
