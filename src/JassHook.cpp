@@ -8,6 +8,7 @@
 #include <fstream>
 #include <sstream>
 #include "dz_registry.h"
+#include "SaveParser.h"
 
 HMODULE g_hModule = NULL;
 wchar_t g_DllDirectory[MAX_PATH] = {0};
@@ -712,20 +713,17 @@ void ProcessSingleCommand(const std::string& cmd) {
             KillSelectedUnit();
         }
     }
-    else if (cmd.rfind("SAVE:", 0) == 0) {
-        char buf[512];
-        strncpy_s(buf, cmd.c_str(), sizeof(buf));
-        char* ctx = nullptr;
-        strtok_s(buf, ":", &ctx); // Skip SAVE
-        char* pStr = strtok_s(nullptr, ":", &ctx);
-        char* kStr = strtok_s(nullptr, ":", &ctx);
-        char* vStr = strtok_s(nullptr, ":", &ctx);
-        if (pStr && kStr && vStr && g_gameHwnd) {
+    else if (cmd.rfind("SAVE:", 0) == 0 || (cmd.find("Player") != std::string::npos && cmd.find("Key") != std::string::npos)) {
+        std::string p, k, v;
+        if (ParseSaveLine(cmd, "1048602", p, k, v) && g_gameHwnd) {
             SaveData sd;
-            sd.player = atoi(pStr);
-            strncpy_s(sd.key, kStr, sizeof(sd.key));
-            strncpy_s(sd.val, vStr, sizeof(sd.val));
+            sd.player = atoi(p.c_str());
+            strncpy_s(sd.key, k.c_str(), sizeof(sd.key));
+            strncpy_s(sd.val, v.c_str(), sizeof(sd.val));
             SendMessageA(g_gameHwnd, WM_APP + 3, 0, (LPARAM)&sd);
+            char logBuf[256];
+            sprintf_s(logBuf, sizeof(logBuf), "[SaveHook] Applied Save via Pipe: Player %d | %s = %s\n", sd.player, sd.key, sd.val);
+            ConsoleLog(logBuf);
         }
     }
     else if (cmd.rfind("MALL:", 0) == 0) {

@@ -1,7 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
-#include <tlhelp32.h>
 #include <shellapi.h>
 #include <string>
 #include <vector>
@@ -11,63 +10,15 @@
 #include <chrono>
 #include <iomanip>
 
+#include "GuiDefs.h"
+#include "SaveParser.h"
+#include "ProcessInjector.h"
+#include "PipeClient.h"
+
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(linker,"\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
-
-// Control Identifiers
-#define IDC_GRP_INJECT            1000
-#define IDC_LBL_WAR3_STATUS       1001
-#define IDC_LBL_HOOK_STATUS       1002
-#define IDC_LBL_PIPE_STATUS       1003
-#define IDC_CHK_AUTO_INJECT       1004
-#define IDC_BTN_INJECT            1005
-#define IDC_BTN_LAUNCH_CLI        1006
-#define IDC_BTN_RECONNECT         1007
-
-#define IDC_GRP_MALL              1010
-#define IDC_CMB_MALL_MODE         1011
-#define IDC_SLIDER_PERCENT        1012
-#define IDC_EDIT_PERCENT          1013
-#define IDC_BTN_APPLY_MALL        1014
-#define IDC_BTN_EDIT_BLACKLIST    1015
-#define IDC_BTN_EDIT_WHITELIST    1016
-#define IDC_BTN_RELOAD_LISTS      1017
-
-#define IDC_GRP_SAVE              1020
-#define IDC_BTN_PANEL             1021
-#define IDC_BTN_SAVEALL           1022
-#define IDC_BTN_OPEN_LOCALSAVE    1023
-#define IDC_EDIT_PID              1024
-#define IDC_EDIT_KEY              1025
-#define IDC_EDIT_VAL              1026
-#define IDC_BTN_SAVE_SINGLE       1027
-#define IDC_EDIT_QUICKSAVE        1028
-#define IDC_BTN_QUICKSAVE         1029
-#define IDC_BTN_PASTE_SAVE        1034
-
-#define IDC_GRP_CMD               1030
-#define IDC_BTN_KILL              1031
-#define IDC_EDIT_CMD              1032
-#define IDC_BTN_SEND_CMD          1033
-
-#define IDC_GRP_LOG               1040
-#define IDC_EDIT_LOG              1041
-#define IDC_CHK_AUTO_SCROLL       1042
-#define IDC_BTN_CLEAR_LOG         1043
-#define IDC_BTN_COPY_LOG          1044
-#define IDC_BTN_OPEN_TRACE        1045
-
-#define IDC_TAB_MONITOR           1050
-#define IDC_LIST_SAVE_MONITOR     1051
-#define IDC_BTN_COPY_SAVE_ITEM    1052
-#define IDC_BTN_FILL_SAVE_INPUT   1053
-#define IDC_BTN_CLEAR_SAVE_LIST   1054
-#define IDC_BTN_RELOAD_SAVE       1055
-
-#define IDT_TIMER_STATUS          1
-#define WM_USER_UPDATE_SAVE_LIST  (WM_USER + 101)
 
 // Global GUI Handles
 HWND g_hWnd = NULL;
@@ -105,89 +56,16 @@ WNDPROC g_oldEditCmdProc = NULL;
 WNDPROC g_oldEditPercentProc = NULL;
 WNDPROC g_oldEditQuickSaveProc = NULL;
 
-HANDLE g_hPipe = INVALID_HANDLE_VALUE;
-CRITICAL_SECTION g_pipeCs;
-
 DWORD g_lastDetectedPid = 0;
 bool g_isDllInjected = false;
 bool g_updatingSlider = false;
-inline void ListView_GetItemTextW_Helper(HWND hwnd, int iItem, int iSubItem, LPWSTR pszText, int cchTextMax) {
-    LVITEMW lvi{};
-    lvi.iSubItem = iSubItem;
-    lvi.cchTextMax = cchTextMax;
-    lvi.pszText = pszText;
-    SendMessageW(hwnd, LVM_GETITEMTEXTW, (WPARAM)iItem, (LPARAM)&lvi);
-}
-
-inline void ListView_SetItemTextW_Helper(HWND hwnd, int iItem, int iSubItem, LPCWSTR pszText) {
-    LVITEMW lvi{};
-    lvi.iSubItem = iSubItem;
-    lvi.pszText = (LPWSTR)pszText;
-    SendMessageW(hwnd, LVM_SETITEMTEXTW, (WPARAM)iItem, (LPARAM)&lvi);
-}
-
-inline int ListView_InsertItemW_Helper(HWND hwnd, const LVITEMW* pitem) {
-    return (int)SendMessageW(hwnd, LVM_INSERTITEMW, 0, (LPARAM)pitem);
-}
-
-inline int ListView_InsertColumnW_Helper(HWND hwnd, int iCol, const LVCOLUMNW* pcol) {
-    return (int)SendMessageW(hwnd, LVM_INSERTCOLUMNW, (WPARAM)iCol, (LPARAM)pcol);
-}
-
-inline int TabCtrl_InsertItemW_Helper(HWND hwnd, int iItem, const TCITEMW* pitem) {
-    return (int)SendMessageW(hwnd, TCM_INSERTITEMW, (WPARAM)iItem, (LPARAM)pitem);
-}
-
-inline BOOL TabCtrl_SetItemW_Helper(HWND hwnd, int iItem, const TCITEMW* pitem) {
-    return (BOOL)SendMessageW(hwnd, TCM_SETITEMW, (WPARAM)iItem, (LPARAM)pitem);
-}
-
-struct SaveRecord {
-    std::wstring time;
-    std::wstring action;
-    std::wstring player;
-    std::wstring key;
-    std::wstring val;
-};
-
-struct SaveItemKey {
-    std::wstring player;
-    std::wstring key;
-    bool operator<(const SaveItemKey& o) const {
-        if (player != o.player) return player < o.player;
-        return key < o.key;
-    }
-};
 
 CRITICAL_SECTION g_saveMonitorCs;
 std::vector<SaveRecord> g_pendingSaveRecords;
 std::map<SaveItemKey, int> g_saveKeyToIndex;
 
-// Conversion helper
-std::wstring Utf8ToWide(const std::string& str) {
-    if (str.empty()) return L"";
-    int size = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), NULL, 0);
-    std::wstring wstr(size, 0);
-    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), &wstr[0], size);
-    return wstr;
-}
-
-std::string WideToUtf8(const std::wstring& wstr) {
-    if (wstr.empty()) return "";
-    int size = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), NULL, 0, NULL, NULL);
-    std::string str(size, 0);
-    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), &str[0], size, NULL, NULL);
-    return str;
-}
-
-std::string GetExeDir() {
-    char path[MAX_PATH];
-    GetModuleFileNameA(NULL, path, MAX_PATH);
-    std::string s = path;
-    size_t last = s.find_last_of("\\/");
-    if (last != std::string::npos) return s.substr(0, last + 1);
-    return ".\\";
-}
+bool g_runLogTailer = true;
+HANDLE g_hLogTailerThread = NULL;
 
 // Append log with timestamp
 void AppendLog(const std::wstring& msg) {
@@ -220,298 +98,45 @@ void AppendLog(const std::wstring& msg) {
     }
 }
 
-// Privilege & Process Detection
-bool EnableDebugPrivilege() {
-    HANDLE token = nullptr;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) return false;
-    LUID luid{};
-    if (!LookupPrivilegeValueW(nullptr, L"SeDebugPrivilege", &luid)) {
-        CloseHandle(token);
-        return false;
-    }
-    TOKEN_PRIVILEGES tp{};
-    tp.PrivilegeCount = 1;
-    tp.Privileges[0].Luid = luid;
-    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-    SetLastError(0);
-    BOOL ok = AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp), nullptr, nullptr);
-    DWORD error = GetLastError();
-    CloseHandle(token);
-    return ok && error == 0;
-}
-
-DWORD FindProcessId() {
-    PROCESSENTRY32W pe{};
-    pe.dwSize = sizeof(pe);
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return 0;
-    
-    DWORD pid = 0;
-    if (Process32FirstW(snap, &pe)) {
-        do {
-            if (lstrcmpiW(pe.szExeFile, L"war3.exe") == 0 ||
-                lstrcmpiW(pe.szExeFile, L"War3.exe") == 0 ||
-                lstrcmpiW(pe.szExeFile, L"Warcraft III.exe") == 0) {
-                pid = pe.th32ProcessID;
-                break;
-            }
-        } while (Process32NextW(snap, &pe));
-    }
-    CloseHandle(snap);
-    return pid;
-}
-
-bool IsDllInjected(DWORD pid, const std::wstring& dllName) {
-    if (pid == 0) return false;
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-    if (snap == INVALID_HANDLE_VALUE) return false;
-    MODULEENTRY32W me{};
-    me.dwSize = sizeof(me);
-    bool found = false;
-    if (Module32FirstW(snap, &me)) {
-        do {
-            if (lstrcmpiW(me.szModule, dllName.c_str()) == 0) {
-                found = true;
-                break;
-            }
-        } while (Module32NextW(snap, &me));
-    }
-    CloseHandle(snap);
-    return found;
-}
-
-bool InjectDLL(DWORD processID, const std::string& dllPath, std::wstring& outErr) {
-    EnableDebugPrivilege();
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, processID);
-    if (!hProcess) {
-        DWORD err = GetLastError();
-        outErr = L"OpenProcess 失敗 (錯誤碼 " + std::to_wstring(err) + L")，請確認是否具備系統管理員身分。";
-        return false;
+// Perform DLL Injection
+void DoInject() {
+    DWORD pid = FindProcessId();
+    if (pid == 0) {
+        AppendLog(L"[-] 注入失敗: 未偵測到 war3.exe，請先開啟遊戲並進入地圖！");
+        MessageBoxW(g_hWnd, L"未偵測到 war3.exe！\n請先透過 KK 平台啟動遊戲並進入地圖。", L"提示", MB_ICONWARNING);
+        return;
     }
 
-    void* loc = VirtualAllocEx(hProcess, 0, MAX_PATH, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!loc) {
-        DWORD err = GetLastError();
-        outErr = L"VirtualAllocEx 記憶體配置失敗 (錯誤碼 " + std::to_wstring(err) + L")";
-        CloseHandle(hProcess);
-        return false;
+    if (IsDllInjected(pid, L"JassHook.dll")) {
+        AppendLog(L"[*] JassHook.dll 已存在於目標進程中，無需重複注入。");
+        return;
     }
 
-    if (!WriteProcessMemory(hProcess, loc, dllPath.c_str(), dllPath.length() + 1, 0)) {
-        DWORD err = GetLastError();
-        outErr = L"WriteProcessMemory 失敗 (錯誤碼 " + std::to_wstring(err) + L")";
-        VirtualFreeEx(hProcess, loc, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return false;
-    }
-
-    HANDLE hThread = CreateRemoteThread(hProcess, 0, 0, (LPTHREAD_START_ROUTINE)LoadLibraryA, loc, 0, 0);
-    if (!hThread) {
-        DWORD err = GetLastError();
-        outErr = L"CreateRemoteThread 遠端線程創建失敗 (錯誤碼 " + std::to_wstring(err) + L")";
-        VirtualFreeEx(hProcess, loc, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        return false;
-    }
-
-    WaitForSingleObject(hThread, 3000);
-    CloseHandle(hThread);
-    CloseHandle(hProcess);
-    return true;
-}
-
-// Named Pipe Communication (Inbound only to game, purely non-blocking)
-bool ConnectPipe() {
-    EnterCriticalSection(&g_pipeCs);
-    if (g_hPipe != INVALID_HANDLE_VALUE) {
-        LeaveCriticalSection(&g_pipeCs);
-        return true;
-    }
-    g_hPipe = CreateFileA(
-        "\\\\.\\pipe\\War3JassDevTool",
-        GENERIC_WRITE,
-        0, NULL, OPEN_EXISTING, 0, NULL);
-    bool ok = (g_hPipe != INVALID_HANDLE_VALUE);
-    LeaveCriticalSection(&g_pipeCs);
-    return ok;
-}
-
-void DisconnectPipe() {
-    EnterCriticalSection(&g_pipeCs);
-    if (g_hPipe != INVALID_HANDLE_VALUE) {
-        CloseHandle(g_hPipe);
-        g_hPipe = INVALID_HANDLE_VALUE;
-    }
-    LeaveCriticalSection(&g_pipeCs);
-}
-
-bool SendPipeCommand(const std::string& cmd) {
-    if (!ConnectPipe()) return false;
-    EnterCriticalSection(&g_pipeCs);
-    if (g_hPipe == INVALID_HANDLE_VALUE) {
-        LeaveCriticalSection(&g_pipeCs);
-        return false;
-    }
-    std::string payload = cmd;
-    if (payload.empty() || payload.back() != '\n') {
-        payload += "\n";
-    }
-    DWORD bytesWritten = 0;
-    BOOL ok = WriteFile(g_hPipe, payload.c_str(), (DWORD)payload.length(), &bytesWritten, NULL);
-    if (!ok) {
-        CloseHandle(g_hPipe);
-        g_hPipe = INVALID_HANDLE_VALUE;
-    }
-    LeaveCriticalSection(&g_pipeCs);
-    return ok != FALSE;
-}
-
-// Flexible parser supporting all known save formats:
-// 1. 1048602:Key=Val
-// 2. Key=Val (auto-assigns defPid)
-// 3. !save 1048602 Key Val or !save Key Val
-// 4. SAVE:1048602:Key:Val or SAVE:1048602:Key=Val
-// 5. Player 1048602 SAVED/LOADED: Key = Val
-// 6. [SaveServerValue] Player: 1048602 | Key: "Key" | Value: "Val"
-// 7. Space-separated: 1048602 Key Val
-bool ParseSaveLine(const std::string& rawLine, const std::string& defPid, std::string& outPid, std::string& outKey, std::string& outVal) {
-    std::string line = rawLine;
-    while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
-    while (!line.empty() && (line.front() == ' ' || line.front() == '\t')) line.erase(line.begin());
-    if (line.empty() || line[0] == '#' || line[0] == ';') return false;
-
-    // 1. Strip !save or !SAVE prefix
-    if (line.rfind("!save ", 0) == 0 || line.rfind("!SAVE ", 0) == 0) {
-        line = line.substr(6);
-        while (!line.empty() && line.front() == ' ') line.erase(line.begin());
-    }
-
-    // 2. Strip SAVE: or save: prefix
-    if (line.rfind("SAVE:", 0) == 0 || line.rfind("save:", 0) == 0) {
-        line = line.substr(5);
-    }
-
-    // 3. Parse dztrace format: [SaveServerValue] / [GetServerValue] Player: 1048602 | Key: "xxx" | Value...: "yyy"
-    if (line.find("Player:") != std::string::npos && line.find("Key:") != std::string::npos) {
-        size_t pPos = line.find("Player:");
-        size_t kPos = line.find("Key:");
-        size_t vPos = line.find("Value");
-        if (pPos != std::string::npos && kPos != std::string::npos && vPos != std::string::npos) {
-            size_t pNumStart = line.find_first_of("0123456789", pPos);
-            if (pNumStart != std::string::npos) {
-                size_t pNumEnd = line.find_first_not_of("0123456789", pNumStart);
-                outPid = line.substr(pNumStart, (pNumEnd == std::string::npos ? line.length() : pNumEnd) - pNumStart);
-            }
-            size_t q1 = line.find('"', kPos);
-            size_t q2 = (q1 != std::string::npos) ? line.find('"', q1 + 1) : std::string::npos;
-            if (q1 != std::string::npos && q2 != std::string::npos) {
-                outKey = line.substr(q1 + 1, q2 - q1 - 1);
-            }
-            size_t q3 = line.find('"', vPos);
-            size_t q4 = (q3 != std::string::npos) ? line.find('"', q3 + 1) : std::string::npos;
-            if (q3 != std::string::npos && q4 != std::string::npos) {
-                outVal = line.substr(q3 + 1, q4 - q3 - 1);
-            }
-            if (!outKey.empty() && !outVal.empty()) {
-                if (outPid.empty()) outPid = defPid;
-                return true;
-            }
+    std::string exeDir = GetExeDir();
+    std::string dllPath = exeDir + "JassHook.dll";
+    if (GetFileAttributesA(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        dllPath = exeDir + "bin\\JassHook.dll";
+        if (GetFileAttributesA(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            AppendLog(L"[-] 注入失敗: 找不到 JassHook.dll 檔案！");
+            MessageBoxW(g_hWnd, L"找不到 JassHook.dll 檔案！請確認放在同一目錄或 bin 目錄下。", L"錯誤", MB_ICONERROR);
+            return;
         }
     }
 
-    // 4. Parse local_save format: Player 1048602 SAVED: Key = Val or LOADED: Key = Val
-    if (line.find("Player ") == 0 && (line.find(" SAVED: ") != std::string::npos || line.find(" LOADED: ") != std::string::npos || line.find(" SET_STAT: ") != std::string::npos)) {
-        size_t sp1 = 7;
-        size_t sp2 = line.find(' ', sp1);
-        if (sp2 != std::string::npos) {
-            outPid = line.substr(sp1, sp2 - sp1);
-            size_t colon = line.find(": ", sp2);
-            size_t eq = line.find(" = ", colon);
-            if (colon != std::string::npos && eq != std::string::npos) {
-                outKey = line.substr(colon + 2, eq - (colon + 2));
-                outVal = line.substr(eq + 3);
-                return true;
-            }
+    AppendLog(L"[*] 正在注入 JassHook.dll 至進程 PID: " + std::to_wstring(pid) + L" ...");
+    std::wstring err;
+    if (InjectDLL(pid, dllPath, err)) {
+        AppendLog(L"[+] 恭喜！JassHook.dll 注入成功！");
+        g_isDllInjected = true;
+        Sleep(250);
+        if (ConnectPipe()) {
+            AppendLog(L"[IPC] 已成功連線至魔獸爭霸 IPC 管道！");
         }
+    } else {
+        AppendLog(L"[-] 注入失敗: " + err);
+        MessageBoxW(g_hWnd, (L"注入失敗: " + err + L"\n請確認是否以「系統管理員身分」執行本程式！").c_str(), L"錯誤", MB_ICONERROR);
     }
-
-    // Helper trimmer
-    auto trimStr = [](std::string& s) {
-        while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r')) s.pop_back();
-        while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.erase(s.begin());
-    };
-
-    // 5. Standard Player:Key=Value (save_panel format)
-    size_t colon = line.find(':');
-    size_t eq = line.find('=');
-    if (colon != std::string::npos && eq != std::string::npos && colon < eq) {
-        outPid = line.substr(0, colon);
-        outKey = line.substr(colon + 1, eq - colon - 1);
-        outVal = line.substr(eq + 1);
-        trimStr(outPid);
-        trimStr(outKey);
-        trimStr(outVal);
-        if (!outKey.empty() && !outVal.empty()) {
-            if (outPid.empty()) outPid = defPid;
-            return true;
-        }
-    }
-
-    // 5b. Colon only: Player:Key:Val
-    if (colon != std::string::npos) {
-        size_t colon2 = line.find(':', colon + 1);
-        if (colon2 != std::string::npos) {
-            outPid = line.substr(0, colon);
-            outKey = line.substr(colon + 1, colon2 - colon - 1);
-            outVal = line.substr(colon2 + 1);
-            trimStr(outPid);
-            trimStr(outKey);
-            trimStr(outVal);
-            if (!outKey.empty() && !outVal.empty()) {
-                if (outPid.empty()) outPid = defPid;
-                return true;
-            }
-        }
-    }
-
-    // 6. Key=Value (without Player ID)
-    if (eq != std::string::npos) {
-        outPid = defPid;
-        outKey = line.substr(0, eq);
-        outVal = line.substr(eq + 1);
-        trimStr(outKey);
-        trimStr(outVal);
-        if (!outKey.empty() && !outVal.empty()) {
-            return true;
-        }
-    }
-
-    // 7. Space-separated tokens: Player Key Val (3 tokens) or Key Val (2 tokens)
-    std::stringstream tss(line);
-    std::vector<std::string> tokens;
-    std::string tok;
-    while (tss >> tok) tokens.push_back(tok);
-
-    if (tokens.size() >= 3) {
-        outPid = tokens[0];
-        outKey = tokens[1];
-        outVal = tokens[2];
-        for (size_t i = 3; i < tokens.size(); i++) {
-            outVal += " " + tokens[i];
-        }
-        return true;
-    } else if (tokens.size() == 2) {
-        outPid = defPid;
-        outKey = tokens[0];
-        outVal = tokens[1];
-        return true;
-    }
-
-    return false;
 }
-
-bool g_runLogTailer = true;
-HANDLE g_hLogTailerThread = NULL;
 
 // Non-blocking log tailer from dztrace.log (Completely decoupled from the game process)
 DWORD WINAPI LogTailerThread(LPVOID lpParam) {
@@ -549,7 +174,7 @@ DWORD WINAPI LogTailerThread(LPVOID lpParam) {
                 std::stringstream ss(newChunk);
                 std::string line;
                 while (std::getline(ss, line)) {
-                    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+                    TrimSaveString(line);
                     if (!line.empty()) {
                         AppendLog(Utf8ToWide(line));
 
@@ -608,46 +233,6 @@ DWORD WINAPI LogTailerThread(LPVOID lpParam) {
     return 0;
 }
 
-// Perform DLL Injection
-void DoInject() {
-    DWORD pid = FindProcessId();
-    if (pid == 0) {
-        AppendLog(L"[-] 注入失敗: 未偵測到 war3.exe，請先開啟遊戲並進入地圖！");
-        MessageBoxW(g_hWnd, L"未偵測到 war3.exe！\n請先透過 KK 平台啟動遊戲並進入地圖。", L"提示", MB_ICONWARNING);
-        return;
-    }
-
-    if (IsDllInjected(pid, L"JassHook.dll")) {
-        AppendLog(L"[*] JassHook.dll 已存在於目標進程中，無需重複注入。");
-        return;
-    }
-
-    std::string exeDir = GetExeDir();
-    std::string dllPath = exeDir + "JassHook.dll";
-    if (GetFileAttributesA(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        dllPath = exeDir + "bin\\JassHook.dll";
-        if (GetFileAttributesA(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            AppendLog(L"[-] 注入失敗: 找不到 JassHook.dll 檔案！");
-            MessageBoxW(g_hWnd, L"找不到 JassHook.dll 檔案！請確認放在同一目錄或 bin 目錄下。", L"錯誤", MB_ICONERROR);
-            return;
-        }
-    }
-
-    AppendLog(L"[*] 正在注入 JassHook.dll 至進程 PID: " + std::to_wstring(pid) + L" ...");
-    std::wstring err;
-    if (InjectDLL(pid, dllPath, err)) {
-        AppendLog(L"[+] 恭喜！JassHook.dll 注入成功！");
-        g_isDllInjected = true;
-        Sleep(250);
-        if (ConnectPipe()) {
-            AppendLog(L"[IPC] 已成功連線至魔獸爭霸 IPC 管道！");
-        }
-    } else {
-        AppendLog(L"[-] 注入失敗: " + err);
-        MessageBoxW(g_hWnd, (L"注入失敗: " + err + L"\n請確認是否以「系統管理員身分」執行本程式！").c_str(), L"錯誤", MB_ICONERROR);
-    }
-}
-
 // Generate Save Panel from local_save.txt & open in Notepad
 void GenerateAndOpenPanel() {
     std::string exeDir = GetExeDir();
@@ -666,49 +251,10 @@ void GenerateAndOpenPanel() {
     std::string line;
     std::string detectedPid = "";
     while (std::getline(infile, line)) {
-        if (line.find("[GetServerValue]") != std::string::npos) {
-            size_t pPos = line.find("Player: ");
-            size_t kPos = line.find(" | Key: \"");
-            size_t vPos = line.find("\" | Value(From Server): \"");
-            if (pPos != std::string::npos && kPos != std::string::npos && vPos != std::string::npos) {
-                std::string player = line.substr(pPos + 8, kPos - (pPos + 8));
-                size_t kEnd = line.find("\"", kPos + 9);
-                std::string key = line.substr(kPos + 9, kEnd - (kPos + 9));
-                size_t vStart = vPos + 25;
-                size_t vEnd = line.find("\"", vStart);
-                std::string val = line.substr(vStart, vEnd - vStart);
-                uniqueKeys[{player, key}] = val;
-                if (detectedPid.empty()) detectedPid = player;
-            }
-        }
-        else if (line.find("LOADED:") != std::string::npos) {
-            size_t pPos = line.find("Player ");
-            size_t lPos = line.find(" LOADED: ");
-            if (pPos != std::string::npos && lPos != std::string::npos) {
-                std::string player = line.substr(pPos + 7, lPos - (pPos + 7));
-                size_t eqPos = line.find(" = ", lPos);
-                if (eqPos != std::string::npos) {
-                    std::string key = line.substr(lPos + 9, eqPos - (lPos + 9));
-                    std::string val = line.substr(eqPos + 3);
-                    if (val == "(null/empty)") val = "1";
-                    uniqueKeys[{player, key}] = val;
-                    if (detectedPid.empty()) detectedPid = player;
-                }
-            }
-        }
-        else if (line.find("SAVED:") != std::string::npos) {
-            size_t pPos = line.find("Player ");
-            size_t lPos = line.find(" SAVED: ");
-            if (pPos != std::string::npos && lPos != std::string::npos) {
-                std::string player = line.substr(pPos + 7, lPos - (pPos + 7));
-                size_t eqPos = line.find(" = ", lPos);
-                if (eqPos != std::string::npos) {
-                    std::string key = line.substr(lPos + 8, eqPos - (lPos + 8));
-                    std::string val = line.substr(eqPos + 3);
-                    uniqueKeys[{player, key}] = val;
-                    if (detectedPid.empty()) detectedPid = player;
-                }
-            }
+        std::string p, k, v;
+        if (ParseSaveLine(line, "1048602", p, k, v)) {
+            uniqueKeys[{p, k}] = v;
+            if (detectedPid.empty()) detectedPid = p;
         }
     }
     infile.close();
@@ -762,16 +308,10 @@ void SaveAllFromPanel() {
     std::string line;
     int count = 0;
     while (std::getline(pfile, line)) {
+        TrimSaveString(line);
         if (line.empty() || line[0] == '#' || line[0] == ';') continue;
-        size_t colon = line.find(':');
-        size_t eq = line.find('=');
-        if (colon != std::string::npos && eq != std::string::npos && eq > colon) {
-            std::string p = line.substr(0, colon);
-            std::string k = line.substr(colon + 1, eq - colon - 1);
-            std::string v = line.substr(eq + 1);
-            while (!v.empty() && (v.back() == '\r' || v.back() == ' ')) v.pop_back();
-            while (!v.empty() && v.front() == ' ') v.erase(v.begin());
-            
+        std::string p, k, v;
+        if (ParseSaveLine(line, "1048602", p, k, v)) {
             std::string payload = "SAVE:" + p + ":" + k + ":" + v;
             if (SendPipeCommand(payload)) {
                 count++;
@@ -784,7 +324,7 @@ void SaveAllFromPanel() {
     MessageBoxW(g_hWnd, (L"批量回寫完成！共送出 " + std::to_wstring(count) + L" 筆指令。").c_str(), L"成功", MB_ICONINFORMATION);
 }
 
-// Execute Quick Save (Parses any save format and supports multiline batch)
+// Execute Quick Save (Parses all save formats, updates UI fields, and sends via Pipe)
 void ExecuteQuickSave(const std::string& rawText) {
     if (rawText.empty()) {
         MessageBoxW(g_hWnd, L"請輸入存檔指令或貼上存檔格式內容！", L"提示", MB_ICONWARNING);
@@ -802,14 +342,18 @@ void ExecuteQuickSave(const std::string& rawText) {
     std::string line;
     int successCount = 0;
     int failCount = 0;
+    std::string lastParsedPid, lastParsedKey, lastParsedVal;
 
     while (std::getline(ss, line)) {
-        while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
-        while (!line.empty() && (line.front() == ' ' || line.front() == '\t')) line.erase(line.begin());
+        TrimSaveString(line);
         if (line.empty() || line[0] == '#' || line[0] == ';') continue;
 
         std::string pid, key, val;
         if (ParseSaveLine(line, defPid, pid, key, val)) {
+            lastParsedPid = pid;
+            lastParsedKey = key;
+            lastParsedVal = val;
+
             std::string payload = "SAVE:" + pid + ":" + key + ":" + val;
             if (SendPipeCommand(payload)) {
                 successCount++;
@@ -844,6 +388,13 @@ void ExecuteQuickSave(const std::string& rawText) {
             failCount++;
             AppendLog(L"[-] 無法解析存檔格式: " + Utf8ToWide(line));
         }
+    }
+
+    // Auto-update the PID, Key, Val text boxes if single entry was executed
+    if (successCount == 1 && !lastParsedKey.empty()) {
+        if (g_hEditPid && !lastParsedPid.empty()) SetWindowTextA(g_hEditPid, lastParsedPid.c_str());
+        if (g_hEditKey) SetWindowTextA(g_hEditKey, lastParsedKey.c_str());
+        if (g_hEditVal) SetWindowTextA(g_hEditVal, lastParsedVal.c_str());
     }
 
     if (successCount > 0) {
@@ -1015,7 +566,7 @@ void LoadExistingSavesFromFile() {
 
     std::vector<SaveRecord> recs;
     while (std::getline(infile, line)) {
-        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        TrimSaveString(line);
         if (line.empty()) continue;
 
         std::string pid, key, val;
@@ -1158,16 +709,24 @@ void OpenTextFile(const std::string& filename, const std::string& defaultContent
     ShellExecuteA(g_hWnd, "open", "notepad.exe", fullPath.c_str(), NULL, SW_SHOWNORMAL);
 }
 
-// Process Command Input
+// Process Command Input (Supports !commands and raw save formats)
 void ProcessUserCommand(const std::string& cmd) {
     if (cmd.empty()) return;
     
     std::string c = cmd;
-    while (!c.empty() && (c.back() == '\r' || c.back() == '\n' || c.back() == ' ')) c.pop_back();
-    while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+    TrimSaveString(c);
     if (c.empty()) return;
 
     AppendLog(L"> " + Utf8ToWide(c));
+
+    std::string defPid = "1048602";
+    if (g_hEditPid) {
+        char pBuf[64];
+        GetWindowTextA(g_hEditPid, pBuf, sizeof(pBuf));
+        if (strlen(pBuf) > 0) defPid = pBuf;
+    }
+
+    std::string testPid, testKey, testVal;
 
     if (c == "!kill" || c == "!killselected") {
         if (SendPipeCommand("KILL")) {
@@ -1180,7 +739,10 @@ void ProcessUserCommand(const std::string& cmd) {
     else if (c == "!saveall") {
         SaveAllFromPanel();
     }
-    else if (c.rfind("!save", 0) == 0 || c.rfind("SAVE:", 0) == 0 || c.find('=') != std::string::npos || (c.find(':') != std::string::npos && c.find(' ') == std::string::npos)) {
+    else if (c.rfind("!save", 0) == 0 || c.rfind("SAVE:", 0) == 0 ||
+             (c.find("Player") != std::string::npos && c.find("Key") != std::string::npos) ||
+             c.find('=') != std::string::npos ||
+             ParseSaveLine(c, defPid, testPid, testKey, testVal)) {
         ExecuteQuickSave(c);
     }
     else if (c.rfind("!mall ", 0) == 0) {
@@ -1459,7 +1021,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             735, 283, 115, 27, hWnd, (HMENU)IDC_BTN_PASTE_SAVE, NULL, NULL);
         SendMessage(hBtnPasteSave, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        HWND hLblHint = CreateWindowW(L"STATIC", L"💡 存檔格式支援: 玩家ID:Key=Value (例 1048602:HeroExp=9999)、Key=Value 或 !save 指令，支援多行批量貼上與 Enter 鍵發送", WS_CHILD | WS_VISIBLE | SS_LEFT,
+        HWND hLblHint = CreateWindowW(L"STATIC", L"💡 存檔格式支援: [SaveServerValue] Player: ID | Key: \"Key\" | Value: \"Val\"、ID:Key=Val、Key=Val 或 !save，支援多行批量貼上與 Enter 發送", WS_CHILD | WS_VISIBLE | SS_LEFT,
             30, 316, 820, 18, hWnd, NULL, NULL, NULL);
         SendMessage(hLblHint, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
@@ -1616,7 +1178,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
     case WM_COMMAND: {
         int id = LOWORD(wParam);
-        int code = HIWORD(wParam);
 
         switch (id) {
         case IDC_BTN_INJECT:
@@ -1829,7 +1390,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         if (g_hFont) DeleteObject(g_hFont);
         if (g_hFontBold) DeleteObject(g_hFontBold);
         if (g_hFontConsole) DeleteObject(g_hFontConsole);
-        DeleteCriticalSection(&g_pipeCs);
         DeleteCriticalSection(&g_saveMonitorCs);
         PostQuitMessage(0);
         break;
@@ -1842,7 +1402,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    InitializeCriticalSection(&g_pipeCs);
     InitializeCriticalSection(&g_saveMonitorCs);
     
     // Create non-blocking Log Tailer Thread
