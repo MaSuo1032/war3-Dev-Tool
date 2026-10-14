@@ -26,31 +26,48 @@ void PrintMenu() {
     std::cout << "========================================================\n";
 }
 
-DWORD WINAPI CliPipeReader(LPVOID lpParam) {
-    HANDLE hPipe = (HANDLE)lpParam;
-    std::string lineBuf = "";
+DWORD WINAPI CliLogTailer(LPVOID lpParam) {
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::string s = exePath;
+    size_t last = s.find_last_of("\\/");
+    std::string dir = (last != std::string::npos) ? s.substr(0, last + 1) : ".\\";
+    std::string logPath = dir + "dztrace.log";
+    std::streampos lastPos = 0;
+    {
+        std::ifstream initFile(logPath, std::ios::in | std::ios::binary);
+        if (initFile.is_open()) {
+            initFile.seekg(0, std::ios::end);
+            lastPos = initFile.tellg();
+            if (lastPos < 4096) lastPos = 0;
+        }
+    }
     while (true) {
-        DWORD bytesAvail = 0;
-        if (PeekNamedPipe(hPipe, NULL, 0, NULL, &bytesAvail, NULL) && bytesAvail > 0) {
-            char chunk[2048];
-            DWORD toRead = (bytesAvail < sizeof(chunk) - 1) ? bytesAvail : (sizeof(chunk) - 1);
-            DWORD bytesRead = 0;
-            if (ReadFile(hPipe, chunk, toRead, &bytesRead, NULL) && bytesRead > 0) {
-                chunk[bytesRead] = '\0';
-                lineBuf.append(chunk, bytesRead);
-                size_t nl;
-                while ((nl = lineBuf.find('\n')) != std::string::npos) {
-                    std::string line = lineBuf.substr(0, nl);
-                    lineBuf.erase(0, nl + 1);
+        std::ifstream file(logPath, std::ios::in | std::ios::binary);
+        if (file.is_open()) {
+            file.seekg(0, std::ios::end);
+            std::streampos curSize = file.tellg();
+            if (curSize < lastPos) lastPos = 0;
+            if (curSize > lastPos) {
+                file.seekg(lastPos);
+                size_t bytesToRead = (size_t)(curSize - lastPos);
+                std::string newChunk;
+                newChunk.resize(bytesToRead);
+                file.read(&newChunk[0], bytesToRead);
+                lastPos = curSize;
+
+                std::stringstream ss(newChunk);
+                std::string line;
+                while (std::getline(ss, line)) {
                     while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
                     if (!line.empty()) {
                         std::cout << "\n[MONITOR] " << line << "\n> " << std::flush;
                     }
                 }
             }
-        } else {
-            Sleep(50);
+            file.close();
         }
+        Sleep(200);
     }
     return 0;
 }
@@ -63,7 +80,7 @@ int main() {
     while (true) {
         hPipe = CreateFileA(
             "\\\\.\\pipe\\War3JassDevTool",
-            GENERIC_READ | GENERIC_WRITE,
+            GENERIC_WRITE,
             0,
             NULL,
             OPEN_EXISTING,
@@ -77,8 +94,8 @@ int main() {
         Sleep(2000);
     }
     
-    std::cout << "[IPC] 已成功連線至魔獸爭霸！(已啟用即時 DzAPI 監控串流)\n";
-    CreateThread(NULL, 0, CliPipeReader, (LPVOID)hPipe, 0, NULL);
+    std::cout << "[IPC] 已成功連線至魔獸爭霸！(已啟用非阻塞 dztrace.log 監控串流)\n";
+    CreateThread(NULL, 0, CliLogTailer, NULL, 0, NULL);
 
     std::string input;
     while (true) {

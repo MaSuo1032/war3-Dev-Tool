@@ -31,7 +31,6 @@ int g_nativeCount = 0;
 
 HWND g_gameHwnd = NULL;
 WNDPROC OriginalWndProc = NULL;
-HANDLE g_activePipe = INVALID_HANDLE_VALUE;
 
 int g_MallMode = 2;         // 0=Off, 1=Whitelist, 2=All, 3=Percent
 int g_MallPercent = 80;     // Default 80%
@@ -45,15 +44,7 @@ void ConsoleLog(const char* msg) {
         WriteConsoleA(hConsole, msg, (DWORD)strlen(msg), &w, NULL);
     }
     
-    // Real-time bidirectional streaming to connected DevTool UI / CLI
-    if (g_activePipe != INVALID_HANDLE_VALUE) {
-        DWORD bw;
-        if (!WriteFile(g_activePipe, msg, (DWORD)strlen(msg), &bw, NULL)) {
-            g_activePipe = INVALID_HANDLE_VALUE;
-        }
-    }
-    
-    // Also save to a log file in the game directory
+    // Save to dztrace.log (External tools read this asynchronously without blocking the game)
     FILE* fp = nullptr;
     wchar_t logPath[MAX_PATH];
     swprintf_s(logPath, MAX_PATH, L"%s\\dztrace.log", g_DllDirectory);
@@ -803,12 +794,12 @@ void ProcessSingleCommand(const std::string& cmd) {
     }
 }
 
-// Pipe Thread (Duplex Named Pipe)
+// Pipe Thread (Pure Inbound Command Receiver - NEVER blocks the game engine)
 DWORD WINAPI PipeServerThread(LPVOID lpParam) {
     while (true) {
         HANDLE hPipe = CreateNamedPipeA(
             "\\\\.\\pipe\\War3JassDevTool",
-            PIPE_ACCESS_DUPLEX,
+            PIPE_ACCESS_INBOUND,
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
             1, 65536, 65536, 0, NULL);
         
@@ -819,7 +810,6 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam) {
 
         bool connected = ConnectNamedPipe(hPipe, NULL) ? true : (GetLastError() == ERROR_PIPE_CONNECTED);
         if (connected) {
-            g_activePipe = hPipe;
             ConsoleLog("[IPC] Client connected to Named Pipe successfully.\n");
             
             char buffer[4096];
@@ -852,7 +842,6 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam) {
                 }
             }
             
-            g_activePipe = INVALID_HANDLE_VALUE;
             DisconnectNamedPipe(hPipe);
         }
         CloseHandle(hPipe);

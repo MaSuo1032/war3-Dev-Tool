@@ -84,9 +84,6 @@ WNDPROC g_oldEditPercentProc = NULL;
 
 HANDLE g_hPipe = INVALID_HANDLE_VALUE;
 CRITICAL_SECTION g_pipeCs;
-HANDLE g_hPipeReaderThread = NULL;
-bool g_runPipeReader = true;
-std::string g_pipeLogBuffer = "";
 
 DWORD g_lastDetectedPid = 0;
 bool g_isDllInjected = false;
@@ -249,7 +246,7 @@ bool InjectDLL(DWORD processID, const std::string& dllPath, std::wstring& outErr
     return true;
 }
 
-// Named Pipe Communication
+// Named Pipe Communication (Inbound only to game, purely non-blocking)
 bool ConnectPipe() {
     EnterCriticalSection(&g_pipeCs);
     if (g_hPipe != INVALID_HANDLE_VALUE) {
@@ -258,7 +255,7 @@ bool ConnectPipe() {
     }
     g_hPipe = CreateFileA(
         "\\\\.\\pipe\\War3JassDevTool",
-        GENERIC_READ | GENERIC_WRITE,
+        GENERIC_WRITE,
         0, NULL, OPEN_EXISTING, 0, NULL);
     bool ok = (g_hPipe != INVALID_HANDLE_VALUE);
     LeaveCriticalSection(&g_pipeCs);
@@ -295,46 +292,54 @@ bool SendPipeCommand(const std::string& cmd) {
     return ok != FALSE;
 }
 
-DWORD WINAPI PipeLogReaderThread(LPVOID lpParam) {
-    while (g_runPipeReader) {
-        bool hasData = false;
-        DWORD bytesAvail = 0;
+bool g_runLogTailer = true;
+HANDLE g_hLogTailerThread = NULL;
 
-        EnterCriticalSection(&g_pipeCs);
-        if (g_hPipe != INVALID_HANDLE_VALUE) {
-            if (PeekNamedPipe(g_hPipe, NULL, 0, NULL, &bytesAvail, NULL) && bytesAvail > 0) {
-                hasData = true;
+// Non-blocking log tailer from dztrace.log (Completely decoupled from the game process)
+DWORD WINAPI LogTailerThread(LPVOID lpParam) {
+    std::string exeDir = GetExeDir();
+    std::string logPath = exeDir + "dztrace.log";
+    std::streampos lastPos = 0;
+
+    {
+        std::ifstream initFile(logPath, std::ios::in | std::ios::binary);
+        if (initFile.is_open()) {
+            initFile.seekg(0, std::ios::end);
+            lastPos = initFile.tellg();
+            if (lastPos < 4096) {
+                lastPos = 0;
             }
         }
-        LeaveCriticalSection(&g_pipeCs);
+    }
 
-        if (hasData) {
-            char chunk[4096];
-            DWORD toRead = (bytesAvail < sizeof(chunk) - 1) ? bytesAvail : (sizeof(chunk) - 1);
-            DWORD bytesRead = 0;
+    while (g_runLogTailer) {
+        std::ifstream file(logPath, std::ios::in | std::ios::binary);
+        if (file.is_open()) {
+            file.seekg(0, std::ios::end);
+            std::streampos curSize = file.tellg();
+            if (curSize < lastPos) {
+                lastPos = 0;
+            }
+            if (curSize > lastPos) {
+                file.seekg(lastPos);
+                size_t bytesToRead = (size_t)(curSize - lastPos);
+                std::string newChunk;
+                newChunk.resize(bytesToRead);
+                file.read(&newChunk[0], bytesToRead);
+                lastPos = curSize;
 
-            EnterCriticalSection(&g_pipeCs);
-            BOOL ok = (g_hPipe != INVALID_HANDLE_VALUE) && ReadFile(g_hPipe, chunk, toRead, &bytesRead, NULL);
-            LeaveCriticalSection(&g_pipeCs);
-
-            if (ok && bytesRead > 0) {
-                chunk[bytesRead] = '\0';
-                g_pipeLogBuffer.append(chunk, bytesRead);
-                size_t nl;
-                while ((nl = g_pipeLogBuffer.find('\n')) != std::string::npos) {
-                    std::string line = g_pipeLogBuffer.substr(0, nl);
-                    g_pipeLogBuffer.erase(0, nl + 1);
-                    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
-                        line.pop_back();
-                    }
+                std::stringstream ss(newChunk);
+                std::string line;
+                while (std::getline(ss, line)) {
+                    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
                     if (!line.empty()) {
                         AppendLog(Utf8ToWide(line));
                     }
                 }
             }
-        } else {
-            Sleep(40);
+            file.close();
         }
+        Sleep(150);
     }
     return 0;
 }
@@ -1124,7 +1129,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
     case WM_DESTROY: {
         KillTimer(hWnd, IDT_TIMER_STATUS);
-        g_runPipeReader = false;
+        g_runLogTailer = false;
+        if (g_hLogTailerThread) {
+            WaitForSingleObject(g_hLogTailerThread, 500);
+            CloseHandle(g_hLogTailerThread);
+            g_hLogTailerThread = NULL;
+        }
         DisconnectPipe();
         if (g_hLogBrush) DeleteObject(g_hLogBrush);
         if (g_hFont) DeleteObject(g_hFont);
@@ -1144,8 +1154,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     InitializeCriticalSection(&g_pipeCs);
     
-    // Create Pipe Log Reader Thread
-    g_hPipeReaderThread = CreateThread(NULL, 0, PipeLogReaderThread, NULL, 0, NULL);
+    // Create non-blocking Log Tailer Thread
+    g_hLogTailerThread = CreateThread(NULL, 0, LogTailerThread, NULL, 0, NULL);
 
     WNDCLASSEXW wcex{};
     wcex.cbSize = sizeof(WNDCLASSEX);
