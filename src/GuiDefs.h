@@ -115,6 +115,7 @@
 #define IDC_BTN_ADD_UNIT_AGI      1123
 #define IDC_BTN_ADD_UNIT_INT      1124
 #define IDC_BTN_ADD_UNIT_EXP      1125
+#define IDC_BTN_MEM_BLINK         1126
 
 #define IDT_TIMER_STATUS          1
 #define WM_USER_UPDATE_SAVE_LIST  (WM_USER + 101)
@@ -193,4 +194,13 @@ inline std::string GetExeDir() {
     size_t last = s.find_last_of("\\/");
     if (last != std::string::npos) return s.substr(0, last + 1);
     return ".\\";
+}
+
+inline std::wstring GetExeDirWide() {
+    wchar_t path[32768]{};
+    DWORD length = GetModuleFileNameW(nullptr, path, 32768);
+    if (!length || length >= 32768) return L".\\";
+    std::wstring result(path, length);
+    size_t slash = result.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? L".\\" : result.substr(0, slash + 1);
 }

@@ -1,46 +1,49 @@
 @echo off
 setlocal
-cd /d "%~dp0.."
-
-echo ========================================================
-echo  Building War3DevTool v2.0 (x86 / 32-bit Release)
-echo ========================================================
-
-if not exist build (
-    mkdir build
+set "BUILD_NO_PAUSE=0"
+if defined CI set "BUILD_NO_PAUSE=1"
+if /I "%~1"=="--no-pause" set "BUILD_NO_PAUSE=1"
+if not "%~1"=="" if /I not "%~1"=="--no-pause" (
+    echo Usage: %~nx0 [--no-pause]
+    exit /b 2
 )
 
-cmake -B build -A Win32 -DCMAKE_BUILD_TYPE=Release
-if %errorlevel% neq 0 (
-    echo [-] CMake configuration failed!
-    pause
-    exit /b %errorlevel%
+pushd "%~dp0.."
+if errorlevel 1 exit /b 1
+set "BUILD_EXIT=0"
+
+echo Building War3DevTool ^(x86 / 32-bit Release^)...
+where cmake.exe >nul 2>nul
+if errorlevel 1 (
+    echo [-] CMake is not on PATH. Install CMake 3.15 or newer.
+    set "BUILD_EXIT=1"
+    goto finish
+)
+
+cmake -S . -B build -A Win32
+set "BUILD_EXIT=%errorlevel%"
+if not "%BUILD_EXIT%"=="0" (
+    echo [-] CMake configuration failed.
+    goto finish
 )
 
 cmake --build build --config Release
-if %errorlevel% neq 0 (
-    echo [-] Compilation failed!
-    pause
-    exit /b %errorlevel%
+set "BUILD_EXIT=%errorlevel%"
+if not "%BUILD_EXIT%"=="0" (
+    echo [-] Compilation failed.
+    goto finish
 )
 
-echo.
-echo ========================================================
-echo  Preparing bin release package inside project...
-echo ========================================================
-
-if not exist bin (
-    mkdir bin
+cmake --install build --config Release --component Runtime --prefix "%CD%\bin"
+set "BUILD_EXIT=%errorlevel%"
+if not "%BUILD_EXIT%"=="0" (
+    echo [-] Packaging failed. Close the running tool before replacing its files.
+    goto finish
 )
 
-copy /Y build\bin\Release\JassHook.dll bin\JassHook.dll
-copy /Y build\bin\Release\War3JassDevTool.exe bin\War3JassDevTool.exe
-copy /Y build\bin\Release\Injector.exe bin\Injector.exe
+echo [+] Build and packaging completed: %CD%\bin
 
-copy /Y config\JassHookConfig.ini bin\JassHookConfig.ini
-copy /Y config\mall_blacklist.txt bin\mall_blacklist.txt
-copy /Y config\mall_spoof.txt bin\mall_spoof.txt
-
-echo [+] Build and packaging completed successfully!
-echo Files generated in: %~dp0..\bin
-pause
+:finish
+popd
+if "%BUILD_NO_PAUSE%"=="0" pause
+exit /b %BUILD_EXIT%

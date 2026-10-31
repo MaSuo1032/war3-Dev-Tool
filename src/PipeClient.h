@@ -30,10 +30,21 @@ public:
         Init();
         EnterCriticalSection(&m_cs);
         if (m_hPipe != INVALID_HANDLE_VALUE) {
-            LeaveCriticalSection(&m_cs);
-            return true;
+            ULONG serverPid = 0;
+            HANDLE server = nullptr;
+            if (GetNamedPipeServerProcessId(m_hPipe, &serverPid)) {
+                server = OpenProcess(SYNCHRONIZE, FALSE, serverPid);
+            }
+            bool alive = server && WaitForSingleObject(server, 0) == WAIT_TIMEOUT;
+            if (server) CloseHandle(server);
+            if (alive) {
+                LeaveCriticalSection(&m_cs);
+                return true;
+            }
+            CloseHandle(m_hPipe);
+            m_hPipe = INVALID_HANDLE_VALUE;
         }
-        m_hPipe = CreateFileA(pipeName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        m_hPipe = CreateFileA(pipeName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
         bool ok = (m_hPipe != INVALID_HANDLE_VALUE);
         LeaveCriticalSection(&m_cs);
         return ok;
@@ -61,7 +72,22 @@ public:
             payload += "\n";
         }
         DWORD bytesWritten = 0;
-        BOOL ok = WriteFile(m_hPipe, payload.c_str(), (DWORD)payload.length(), &bytesWritten, NULL);
+        OVERLAPPED operation{};
+        operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        BOOL ok = FALSE;
+        if (operation.hEvent) {
+            ok = WriteFile(m_hPipe, payload.c_str(), (DWORD)payload.length(), &bytesWritten, &operation);
+            if (!ok && GetLastError() == ERROR_IO_PENDING) {
+                if (WaitForSingleObject(operation.hEvent, 1500) == WAIT_OBJECT_0) {
+                    ok = GetOverlappedResult(m_hPipe, &operation, &bytesWritten, FALSE);
+                } else {
+                    CancelIoEx(m_hPipe, &operation);
+                    GetOverlappedResult(m_hPipe, &operation, &bytesWritten, TRUE);
+                }
+            }
+            CloseHandle(operation.hEvent);
+        }
+        ok = ok && bytesWritten == payload.length();
         if (!ok) {
             CloseHandle(m_hPipe);
             m_hPipe = INVALID_HANDLE_VALUE;
@@ -71,7 +97,10 @@ public:
     }
 
     bool IsConnected() const {
-        return m_hPipe != INVALID_HANDLE_VALUE;
+        EnterCriticalSection(&m_cs);
+        bool connected = m_hPipe != INVALID_HANDLE_VALUE;
+        LeaveCriticalSection(&m_cs);
+        return connected;
     }
 
 private:
@@ -83,7 +112,7 @@ private:
     }
 
     HANDLE m_hPipe;
-    CRITICAL_SECTION m_cs;
+    mutable CRITICAL_SECTION m_cs;
     bool m_initialized;
 };
 

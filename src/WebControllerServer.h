@@ -10,6 +10,12 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <mutex>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+#include <cctype>
 
 #include "Wc3Memory.h"
 #include "web_ui.h"
@@ -25,34 +31,44 @@ inline DWORD g_memPid = 0;
 inline ProcessMemory g_memInstance;
 inline WC3Resolver g_memResolver(g_memInstance);
 inline CRITICAL_SECTION g_memCs;
-inline bool g_memCsInitialized = false;
+inline INIT_ONCE g_memInitOnce = INIT_ONCE_STATIC_INIT;
 
-inline bool g_godModeActive = false;
-inline SOCKET g_httpServerSocket = INVALID_SOCKET;
+inline std::atomic<bool> g_godModeActive{false};
+inline std::atomic<SOCKET> g_httpServerSocket{INVALID_SOCKET};
 inline HANDLE g_httpServerThread = nullptr;
-inline bool g_httpServerRunning = false;
+inline std::atomic<bool> g_httpServerRunning{false};
 inline int g_httpServerPort = 8088;
+inline std::mutex g_httpLifecycleMutex;
+
+inline BOOL CALLBACK InitializeMemoryLock(PINIT_ONCE, PVOID, PVOID*) {
+    InitializeCriticalSection(&g_memCs);
+    return TRUE;
+}
 
 inline void InitMemoryController() {
-    if (!g_memCsInitialized) {
-        InitializeCriticalSection(&g_memCs);
-        g_memCsInitialized = true;
-    }
+    InitOnceExecuteOnce(&g_memInitOnce, InitializeMemoryLock, nullptr, nullptr);
 }
 
 inline void CleanupMemoryController() {
-    if (g_memCsInitialized) {
-        EnterCriticalSection(&g_memCs);
-        if (g_memProcess) {
-            CloseHandle(g_memProcess);
-            g_memProcess = nullptr;
-        }
-        g_memGameBase = 0;
-        g_memPid = 0;
-        LeaveCriticalSection(&g_memCs);
-        DeleteCriticalSection(&g_memCs);
-        g_memCsInitialized = false;
+    InitMemoryController();
+    EnterCriticalSection(&g_memCs);
+    g_memInstance.setHandle(nullptr);
+    g_memResolver.setGameBase(0);
+    if (g_memProcess) {
+        CloseHandle(g_memProcess);
+        g_memProcess = nullptr;
     }
+    g_memGameBase = 0;
+    g_memPid = 0;
+    LeaveCriticalSection(&g_memCs);
+    // The lock lives until process exit, so a completing request can never
+    // enter a deleted critical section during shutdown.
+}
+
+inline bool AttachedProcessAlive() {
+    DWORD exitCode = 0;
+    return g_memProcess && g_memGameBase &&
+        GetExitCodeProcess(g_memProcess, &exitCode) && exitCode == STILL_ACTIVE;
 }
 
 inline bool AttachToGame(DWORD targetPid = 0) {
@@ -64,6 +80,8 @@ inline bool AttachToGame(DWORD targetPid = 0) {
     }
 
     if (!targetPid) {
+        g_memInstance.setHandle(nullptr);
+        g_memResolver.setGameBase(0);
         if (g_memProcess) {
             CloseHandle(g_memProcess);
             g_memProcess = nullptr;
@@ -84,6 +102,8 @@ inline bool AttachToGame(DWORD targetPid = 0) {
     }
 
     // Reattach
+    g_memInstance.setHandle(nullptr);
+    g_memResolver.setGameBase(0);
     if (g_memProcess) {
         CloseHandle(g_memProcess);
         g_memProcess = nullptr;
@@ -114,7 +134,7 @@ inline bool AttachToGame(DWORD targetPid = 0) {
 inline bool IsAttached() {
     InitMemoryController();
     EnterCriticalSection(&g_memCs);
-    bool ok = (g_memProcess != nullptr && g_memGameBase != 0);
+    bool ok = AttachedProcessAlive();
     LeaveCriticalSection(&g_memCs);
     return ok;
 }
@@ -124,7 +144,7 @@ inline bool ReadSelectedUnit(UnitInfo* outInfo) {
     InitMemoryController();
     EnterCriticalSection(&g_memCs);
 
-    if (!g_memProcess || !g_memGameBase) {
+    if (!AttachedProcessAlive()) {
         if (!AttachToGame()) {
             LeaveCriticalSection(&g_memCs);
             return false;
@@ -143,10 +163,17 @@ inline bool ReadSelectedUnit(UnitInfo* outInfo) {
 }
 
 inline bool WriteUnitStat(const std::string& field, float value) {
+    if (!std::isfinite(value)) return false;
+    const bool integerField = field == "strength" || field == "agility" ||
+        field == "intelligence" || field == "experience" ||
+        field == "a1_base1" || field == "a1_base2" || field == "a1_dice" || field == "a1_mult" ||
+        field == "a2_base1" || field == "a2_base2" || field == "a2_dice" || field == "a2_mult";
+    if (integerField && (static_cast<double>(value) < (std::numeric_limits<int32_t>::min)() ||
+        static_cast<double>(value) > (std::numeric_limits<int32_t>::max)())) return false;
     InitMemoryController();
     EnterCriticalSection(&g_memCs);
 
-    if (!g_memProcess || !g_memGameBase) {
+    if (!AttachedProcessAlive()) {
         if (!AttachToGame()) {
             LeaveCriticalSection(&g_memCs);
             return false;
@@ -199,7 +226,7 @@ inline bool WriteUnitItemCharges(int slot, int charges) {
     InitMemoryController();
     EnterCriticalSection(&g_memCs);
 
-    if (!g_memProcess || !g_memGameBase) {
+    if (!AttachedProcessAlive()) {
         if (!AttachToGame()) {
             LeaveCriticalSection(&g_memCs);
             return false;
@@ -229,7 +256,7 @@ inline bool ReadPlayerResources(int playerId, int* outGold, int* outLumber, uint
     InitMemoryController();
     EnterCriticalSection(&g_memCs);
 
-    if (!g_memProcess || !g_memGameBase) {
+    if (!AttachedProcessAlive()) {
         if (!AttachToGame()) {
             LeaveCriticalSection(&g_memCs);
             return false;
@@ -260,7 +287,7 @@ inline bool WritePlayerResource(int playerId, const std::string& type, int amoun
     InitMemoryController();
     EnterCriticalSection(&g_memCs);
 
-    if (!g_memProcess || !g_memGameBase) {
+    if (!AttachedProcessAlive()) {
         if (!AttachToGame()) {
             LeaveCriticalSection(&g_memCs);
             return false;
@@ -294,20 +321,23 @@ inline bool WritePlayerResource(int playerId, const std::string& type, int amoun
 
 // Convenient Action Helpers
 inline bool HealSelectedUnit() {
+    InitMemoryController();
+    EnterCriticalSection(&g_memCs);
     UnitInfo info{};
-    if (!ReadSelectedUnit(&info)) return false;
+    if (!ReadSelectedUnit(&info)) { LeaveCriticalSection(&g_memCs); return false; }
 
     float maxHp = 0.0f, maxMp = 0.0f;
     if (info.maxHp.valid) g_memInstance.read(info.maxHp.address, &maxHp);
     if (info.maxMp.valid) g_memInstance.read(info.maxMp.address, &maxMp);
 
-    bool ok = true;
+    bool ok = info.hp.valid && maxHp > 0.0f;
     if (info.hp.valid && maxHp > 0.0f) {
         ok &= g_memInstance.write(info.hp.address, maxHp);
     }
     if (info.mp.valid && maxMp > 0.0f) {
         ok &= g_memInstance.write(info.mp.address, maxMp);
     }
+    LeaveCriticalSection(&g_memCs);
     return ok;
 }
 
@@ -316,42 +346,46 @@ inline bool SetSelectedUnitMaxSpeed() {
 }
 
 inline bool AddSelectedUnitStats(int strDelta, int agiDelta, int intDelta) {
+    InitMemoryController();
+    EnterCriticalSection(&g_memCs);
     UnitInfo info{};
-    if (!ReadSelectedUnit(&info)) return false;
+    if (!ReadSelectedUnit(&info)) { LeaveCriticalSection(&g_memCs); return false; }
 
-    bool ok = true;
-    if (strDelta != 0 && info.strength.valid) {
-        int32_t curStr = 0;
-        if (g_memInstance.read(info.strength.address, &curStr)) {
-            ok &= g_memInstance.write(info.strength.address, curStr + strDelta);
-        }
-    }
-    if (agiDelta != 0 && info.agility.valid) {
-        int32_t curAgi = 0;
-        if (g_memInstance.read(info.agility.address, &curAgi)) {
-            ok &= g_memInstance.write(info.agility.address, curAgi + agiDelta);
-        }
-    }
-    if (intDelta != 0 && info.intelligence.valid) {
-        int32_t curInt = 0;
-        if (g_memInstance.read(info.intelligence.address, &curInt)) {
-            ok &= g_memInstance.write(info.intelligence.address, curInt + intDelta);
-        }
-    }
+    auto add = [](const AddressValue& field, int delta) {
+        if (delta == 0) return true;
+        int32_t current = 0;
+        if (!field.valid || !g_memInstance.read(field.address, &current)) return false;
+        const int64_t result = static_cast<int64_t>(current) + delta;
+        if (result < (std::numeric_limits<int32_t>::min)() || result > (std::numeric_limits<int32_t>::max)()) return false;
+        return g_memInstance.write(field.address, static_cast<int32_t>(result));
+    };
+    bool ok = add(info.strength, strDelta);
+    ok = add(info.agility, agiDelta) && ok;
+    ok = add(info.intelligence, intDelta) && ok;
+    LeaveCriticalSection(&g_memCs);
     return ok;
 }
 
 inline bool AddPlayerGoldLumber(int playerId, int goldDelta, int lumberDelta) {
+    InitMemoryController();
+    EnterCriticalSection(&g_memCs);
     int curGold = 0, curLumber = 0;
-    if (!ReadPlayerResources(playerId, &curGold, &curLumber)) return false;
+    if (!ReadPlayerResources(playerId, &curGold, &curLumber)) { LeaveCriticalSection(&g_memCs); return false; }
 
+    const int64_t newGold = static_cast<int64_t>(curGold) + goldDelta;
+    const int64_t newLumber = static_cast<int64_t>(curLumber) + lumberDelta;
+    if (newGold < 0 || newGold > 214748364 || newLumber < 0 || newLumber > 214748364) {
+        LeaveCriticalSection(&g_memCs);
+        return false;
+    }
     bool ok = true;
     if (goldDelta != 0) {
-        ok &= WritePlayerResource(playerId, "gold", curGold + goldDelta);
+        ok &= WritePlayerResource(playerId, "gold", static_cast<int>(newGold));
     }
     if (lumberDelta != 0) {
-        ok &= WritePlayerResource(playerId, "lumber", curLumber + lumberDelta);
+        ok &= WritePlayerResource(playerId, "lumber", static_cast<int>(newLumber));
     }
+    LeaveCriticalSection(&g_memCs);
     return ok;
 }
 
@@ -369,7 +403,7 @@ inline void TickGodMode() {
     InitMemoryController();
     EnterCriticalSection(&g_memCs);
 
-    if (!g_memProcess || !g_memGameBase) {
+    if (!AttachedProcessAlive()) {
         if (!AttachToGame()) {
             LeaveCriticalSection(&g_memCs);
             return;
@@ -394,6 +428,8 @@ inline void TickGodMode() {
 // -------------------------------------------------------------
 
 inline std::string HandleApiHook() {
+    InitMemoryController();
+    EnterCriticalSection(&g_memCs);
     bool ok = AttachToGame();
     std::ostringstream ss;
     if (ok) {
@@ -401,13 +437,14 @@ inline std::string HandleApiHook() {
     } else {
         ss << "{\"success\":false,\"message\":\"Could not locate war3.exe or Game.dll\"}";
     }
+    LeaveCriticalSection(&g_memCs);
     return ss.str();
 }
 
 inline std::string HandleApiResources() {
     InitMemoryController();
     EnterCriticalSection(&g_memCs);
-    if (!g_memProcess || !g_memGameBase) {
+    if (!AttachedProcessAlive()) {
         LeaveCriticalSection(&g_memCs);
         return "{\"success\":false,\"resources\":[]}";
     }
@@ -455,7 +492,7 @@ inline std::string HandleApiResources() {
 inline std::string HandleApiUnit() {
     InitMemoryController();
     EnterCriticalSection(&g_memCs);
-    if (!g_memProcess || !g_memGameBase) {
+    if (!AttachedProcessAlive()) {
         LeaveCriticalSection(&g_memCs);
         return "{\"found\":false}";
     }
@@ -540,33 +577,50 @@ inline std::string HandleApiUnit() {
     return ss.str();
 }
 
+inline size_t JsonValuePosition(const std::string& body, const char* name) {
+    const std::string key = std::string("\"") + name + "\"";
+    size_t pos = body.find(key);
+    if (pos == std::string::npos) return pos;
+    pos += key.size();
+    while (pos < body.size() && std::isspace(static_cast<unsigned char>(body[pos]))) ++pos;
+    if (pos == body.size() || body[pos++] != ':') return std::string::npos;
+    while (pos < body.size() && std::isspace(static_cast<unsigned char>(body[pos]))) ++pos;
+    return pos < body.size() ? pos : std::string::npos;
+}
+
+inline bool JsonNumber(const std::string& body, const char* name, double* value) {
+    const size_t pos = JsonValuePosition(body, name);
+    if (pos == std::string::npos || (!std::isdigit(static_cast<unsigned char>(body[pos])) && body[pos] != '-')) return false;
+    char* end = nullptr;
+    const double parsed = std::strtod(body.c_str() + pos, &end);
+    if (end == body.c_str() + pos || !std::isfinite(parsed)) return false;
+    while (*end && std::isspace(static_cast<unsigned char>(*end))) ++end;
+    if (*end != ',' && *end != '}') return false;
+    *value = parsed;
+    return true;
+}
+
+inline bool JsonInteger(const std::string& body, const char* name, int* value) {
+    double parsed = 0;
+    if (!JsonNumber(body, name, &parsed) || parsed < (std::numeric_limits<int>::min)() ||
+        parsed > (std::numeric_limits<int>::max)() || std::trunc(parsed) != parsed) return false;
+    *value = static_cast<int>(parsed);
+    return true;
+}
+
 inline std::string HandleApiWrite(const std::string& body) {
-    std::string field;
-    float value = 0.0f;
-
-    size_t fPos = body.find("\"field\":");
-    if (fPos != std::string::npos) {
-        size_t q1 = body.find("\"", fPos + 8);
-        size_t q2 = body.find("\"", q1 + 1);
-        if (q1 != std::string::npos && q2 != std::string::npos) {
-            field = body.substr(q1 + 1, q2 - q1 - 1);
-        }
-    }
-
-    size_t vPos = body.find("\"value\":");
-    if (vPos != std::string::npos) {
-        std::string sub = body.substr(vPos + 8);
-        value = static_cast<float>(atof(sub.c_str()));
-    }
+    const size_t fPos = JsonValuePosition(body, "field");
+    double parsedValue = 0;
+    if (fPos == std::string::npos || body[fPos] != '"' || !JsonNumber(body, "value", &parsedValue)) return "{\"success\":false}";
+    const size_t end = body.find('"', fPos + 1);
+    if (end == std::string::npos) return "{\"success\":false}";
+    const std::string field = body.substr(fPos + 1, end - fPos - 1);
+    const float value = static_cast<float>(parsedValue);
 
     if (field == "gold" || field == "lumber") {
-        int playerId = 0;
-        size_t pPos = body.find("\"player\":");
-        if (pPos != std::string::npos) {
-            playerId = atoi(body.substr(pPos + 9).c_str());
-        }
-
-        bool success = WritePlayerResource(playerId, field, static_cast<int>(value));
+        int playerId = 0, amount = 0;
+        if (!JsonInteger(body, "player", &playerId) || !JsonInteger(body, "value", &amount)) return "{\"success\":false}";
+        bool success = WritePlayerResource(playerId, field, amount);
         std::ostringstream ss;
         ss << "{\"success\":" << (success ? "true" : "false") << "}";
         return ss.str();
@@ -580,12 +634,8 @@ inline std::string HandleApiWrite(const std::string& body) {
 
 inline std::string HandleApiWriteItem(const std::string& body) {
     int slot = -1, charges = 0;
-
-    size_t sPos = body.find("\"slot\":");
-    if (sPos != std::string::npos) slot = atoi(body.substr(sPos + 7).c_str());
-
-    size_t cPos = body.find("\"charges\":");
-    if (cPos != std::string::npos) charges = atoi(body.substr(cPos + 10).c_str());
+    if (!JsonInteger(body, "slot", &slot) || !JsonInteger(body, "charges", &charges) ||
+        slot < 0 || slot >= 6 || charges < 0) return "{\"success\":false}";
 
     bool success = WriteUnitItemCharges(slot, charges);
     std::ostringstream ss;
@@ -595,14 +645,51 @@ inline std::string HandleApiWriteItem(const std::string& body) {
 
 inline DWORD WINAPI ClientHandlerThread(LPVOID param) {
     SOCKET clientSocket = (SOCKET)reinterpret_cast<uintptr_t>(param);
-    char buffer[4096] = {0};
-    int bytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
-    if (bytesRead <= 0) {
+    const DWORD timeoutMs = 1500;
+    setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+    setsockopt(clientSocket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+    std::string req;
+    size_t expectedLength = 0;
+    bool haveHeaders = false;
+    const ULONGLONG deadline = GetTickCount64() + 3000;
+    while (g_httpServerRunning && GetTickCount64() < deadline && req.size() < 65536) {
+        char buffer[4096];
+        int bytesRead = recv(clientSocket, buffer, sizeof(buffer), 0);
+        if (bytesRead <= 0) break;
+        req.append(buffer, bytesRead);
+        size_t headerEnd = req.find("\r\n\r\n");
+        if (!haveHeaders && headerEnd != std::string::npos) {
+            haveHeaders = true;
+            size_t contentLength = 0;
+            std::istringstream headers(req.substr(0, headerEnd));
+            std::string line;
+            bool invalid = false;
+            bool sawLength = false;
+            while (std::getline(headers, line)) {
+                size_t colon = line.find(':');
+                if (colon == std::string::npos) continue;
+                std::string name = line.substr(0, colon);
+                for (char& ch : name) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                if (name == "transfer-encoding") { invalid = true; break; }
+                if (name == "content-length") {
+                    if (sawLength) { invalid = true; break; }
+                    sawLength = true;
+                    std::istringstream value(line.substr(colon + 1));
+                    if (!(value >> contentLength) || contentLength > 32768) { invalid = true; break; }
+                    value >> std::ws;
+                    if (!value.eof()) { invalid = true; break; }
+                }
+            }
+            if (invalid) break;
+            expectedLength = headerEnd + 4 + contentLength;
+        }
+        if (haveHeaders && expectedLength && req.size() >= expectedLength) break;
+    }
+    if (!haveHeaders || !expectedLength || req.size() < expectedLength) {
         closesocket(clientSocket);
         return 0;
     }
-
-    std::string req(buffer, bytesRead);
+    req.resize(expectedLength);
     std::string response;
 
     std::string method, path;
@@ -683,88 +770,92 @@ inline DWORD WINAPI ClientHandlerThread(LPVOID param) {
         response = ss.str();
     }
 
-    send(clientSocket, response.c_str(), static_cast<int>(response.size()), 0);
+    size_t sent = 0;
+    while (sent < response.size() && g_httpServerRunning) {
+        int count = send(clientSocket, response.data() + sent, static_cast<int>(response.size() - sent), 0);
+        if (count <= 0) break;
+        sent += static_cast<size_t>(count);
+    }
     closesocket(clientSocket);
     return 0;
 }
 
 inline DWORD WINAPI HttpServerThread(LPVOID param) {
-    int port = static_cast<int>(reinterpret_cast<uintptr_t>(param));
-    if (port <= 0) port = 8088;
-
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
-
-    g_httpServerSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (g_httpServerSocket == INVALID_SOCKET) {
-        WSACleanup();
-        return 0;
-    }
-
-    sockaddr_in serverAddr{};
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
-    serverAddr.sin_port = htons(static_cast<u_short>(port));
-
-    if (bind(g_httpServerSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-        closesocket(g_httpServerSocket);
-        g_httpServerSocket = INVALID_SOCKET;
-        WSACleanup();
-        return 0;
-    }
-
-    listen(g_httpServerSocket, 10);
-    g_httpServerRunning = true;
-
+    const SOCKET listener = static_cast<SOCKET>(reinterpret_cast<uintptr_t>(param));
     while (g_httpServerRunning) {
-        SOCKET clientSocket = accept(g_httpServerSocket, nullptr, nullptr);
+        SOCKET clientSocket = accept(listener, nullptr, nullptr);
         if (clientSocket != INVALID_SOCKET) {
-            HANDLE hThread = CreateThread(nullptr, 0, ClientHandlerThread, (LPVOID)(uintptr_t)clientSocket, 0, nullptr);
-            if (hThread) {
-                CloseHandle(hThread);
-            } else {
-                closesocket(clientSocket);
-            }
+            // One bounded request at a time. There are no detached request
+            // threads left accessing game memory after server shutdown.
+            ClientHandlerThread(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(clientSocket)));
         } else {
             break;
         }
     }
-
-    if (g_httpServerSocket != INVALID_SOCKET) {
-        closesocket(g_httpServerSocket);
-        g_httpServerSocket = INVALID_SOCKET;
-    }
+    SOCKET remaining = g_httpServerSocket.exchange(INVALID_SOCKET);
+    if (remaining != INVALID_SOCKET) closesocket(remaining);
     WSACleanup();
     g_httpServerRunning = false;
     return 0;
 }
 
 inline bool StartWebControllerServer(int port = 8088) {
-    if (g_httpServerRunning) return true;
-    g_httpServerPort = port;
-    g_httpServerThread = CreateThread(nullptr, 0, HttpServerThread, (LPVOID)(uintptr_t)port, 0, nullptr);
+    std::lock_guard<std::mutex> lock(g_httpLifecycleMutex);
+    if (port <= 0 || port > 65535) return false;
+    if (g_httpServerRunning) return port == g_httpServerPort;
     if (g_httpServerThread) {
-        Sleep(100);
-        return true;
+        if (WaitForSingleObject(g_httpServerThread, 0) != WAIT_OBJECT_0) return false;
+        CloseHandle(g_httpServerThread);
+        g_httpServerThread = nullptr;
     }
-    return false;
+    InitMemoryController();
+    WSADATA wsa{};
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return false;
+    SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listener == INVALID_SOCKET) { WSACleanup(); return false; }
+    BOOL exclusive = TRUE;
+    setsockopt(listener, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&exclusive), sizeof(exclusive));
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(static_cast<u_short>(port));
+    if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == SOCKET_ERROR ||
+        listen(listener, 10) == SOCKET_ERROR) {
+        closesocket(listener);
+        WSACleanup();
+        return false;
+    }
+    g_httpServerPort = port;
+    g_httpServerSocket = listener;
+    g_httpServerRunning = true;
+    g_httpServerThread = CreateThread(nullptr, 0, HttpServerThread, reinterpret_cast<LPVOID>(static_cast<uintptr_t>(listener)), 0, nullptr);
+    if (!g_httpServerThread) {
+        g_httpServerRunning = false;
+        g_httpServerSocket = INVALID_SOCKET;
+        closesocket(listener);
+        WSACleanup();
+        return false;
+    }
+    return true;
 }
 
 inline void StopWebControllerServer() {
+    std::lock_guard<std::mutex> lock(g_httpLifecycleMutex);
     g_httpServerRunning = false;
-    if (g_httpServerSocket != INVALID_SOCKET) {
-        closesocket(g_httpServerSocket);
-        g_httpServerSocket = INVALID_SOCKET;
-    }
+    SOCKET listener = g_httpServerSocket.exchange(INVALID_SOCKET);
+    if (listener != INVALID_SOCKET) closesocket(listener);
+    // recv/send use a timeout; closing the listener wakes accept. Wait until
+    // the sole request handler is finished before memory-controller cleanup.
     if (g_httpServerThread) {
-        WaitForSingleObject(g_httpServerThread, 500);
-        CloseHandle(g_httpServerThread);
-        g_httpServerThread = nullptr;
+        if (WaitForSingleObject(g_httpServerThread, 5000) == WAIT_OBJECT_0) {
+            CloseHandle(g_httpServerThread);
+            g_httpServerThread = nullptr;
+        }
     }
 }
 
 inline bool OpenWebControllerInBrowser(int port = 8088) {
-    StartWebControllerServer(port);
+    if (!StartWebControllerServer(port)) return false;
     std::string url = "http://127.0.0.1:" + std::to_string(port) + "/";
     HINSTANCE res = ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     return reinterpret_cast<intptr_t>(res) > 32;

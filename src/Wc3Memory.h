@@ -65,24 +65,8 @@ namespace WC3_127A {
     constexpr uintptr_t ITEM_NAME_OFF        = 0x30;
     constexpr uintptr_t ITEM_CHARGES_OFF     = 0x84;
 
-    constexpr uintptr_t RESOURCE_LUMBER_OFF  = 0x80;
     constexpr int RESOURCE_MIN_PLAYER        = 1;
     constexpr int RESOURCE_MAX_PLAYER        = 12;
-    constexpr uintptr_t RESOURCE_BASES[13] = {
-        0x0000,
-        0x0190,
-        0x1410,
-        0x26A0,
-        0x3920,
-        0x4BB0,
-        0x5E30,
-        0x70C0,
-        0x8350,
-        0x95D0,
-        0xA860,
-        0xBAE0,
-        0xCD70
-    };
 }
 
 class ProcessMemory {

@@ -23,9 +23,12 @@ Makefile
 *.ilk
 *.pdb
 *.idb
+__pycache__/
+*.pyc
 
 # Game runtime logs & generated panels
 local_save.txt
 save_panel.txt
 dztrace.log
 dz_api.log
+diagnostics/crash_*.json

@@ -14,6 +14,8 @@
 
 #include "GuiDefs.h"
 #include "SaveParser.h"
+#include "SaveCommand.h"
+#include "SaveDiff.h"
 #include "ProcessInjector.h"
 #include "PipeClient.h"
 #include "MapKeyExtractor.h"
@@ -108,6 +110,7 @@ HWND g_hEditUnitExp = NULL;
 HWND g_hBtnAddUnitExp = NULL;
 HWND g_hBtnSetUnitExp = NULL;
 HWND g_hBtnAllStats = NULL;
+HWND g_hBtnMemBlink = NULL;
 
 HWND g_hCmbResPlayer = NULL;
 HWND g_hEditResGold = NULL;
@@ -188,11 +191,11 @@ void DoInject() {
         return;
     }
 
-    std::string exeDir = GetExeDir();
-    std::string dllPath = exeDir + "JassHook.dll";
-    if (GetFileAttributesA(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        dllPath = exeDir + "bin\\JassHook.dll";
-        if (GetFileAttributesA(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    std::wstring exeDir = GetExeDirWide();
+    std::wstring dllPath = exeDir + L"JassHook.dll";
+    if (GetFileAttributesW(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        dllPath = exeDir + L"bin\\JassHook.dll";
+        if (GetFileAttributesW(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
             AppendLog(L"[-] 注入失敗: 找不到 JassHook.dll 檔案！");
             MessageBoxW(g_hWnd, L"找不到 JassHook.dll 檔案！請確認放在同一目錄或 bin 目錄下。", L"錯誤", MB_ICONERROR);
             return;
@@ -202,7 +205,7 @@ void DoInject() {
     AppendLog(L"[*] 正在注入 JassHook.dll 至進程 PID: " + std::to_wstring(pid) + L" ...");
     std::wstring err;
     if (InjectDLL(pid, dllPath, err)) {
-        AppendLog(L"[+] 恭喜！JassHook.dll 注入成功！");
+        AppendLog(L"[+] JassHook.dll 已載入；核心初始化結果請見即時日誌。");
         g_isDllInjected = true;
         Sleep(250);
         if (ConnectPipe()) {
@@ -328,7 +331,7 @@ void GenerateAndOpenPanel() {
     std::string detectedPid = "";
     while (std::getline(infile, line)) {
         std::string p, k, v;
-        if (ParseSaveLine(line, "1048602", p, k, v)) {
+        if (ParseSaveLine(line, "1048602", p, k, v) && ValidateSaveCommand(p,k,v,true)) {
             if (k == v && !isdigit((unsigned char)k[0])) {
                 continue;
             }
@@ -399,8 +402,8 @@ void SaveAllFromPanel() {
         }
     }
     pfile.close();
-    AppendLog(L"[+] 批量回寫完成！共發送 " + std::to_wstring(count) + L" 筆存檔指令至遊戲。");
-    MessageBoxW(g_hWnd, (L"批量回寫完成！共送出 " + std::to_wstring(count) + L" 筆指令。").c_str(), L"成功", MB_ICONINFORMATION);
+    AppendLog(L"[存檔] 已送出 " + std::to_wstring(count) + L" 筆請求；請在日誌檢查 Native result，這不代表平台已持久化。");
+    MessageBoxW(g_hWnd, (L"已送出 " + std::to_wstring(count) + L" 筆請求。請查看日誌的 Native result；平台持久化仍需重新載入確認。").c_str(), L"送出完成", MB_ICONINFORMATION);
 }
 
 // Background thread for querying all map keys from server
@@ -467,21 +470,21 @@ DWORD WINAPI BatchReadWorkerThread(LPVOID lpParam) {
         return 0;
     }
 
-    AppendLog(L"[*] 開始向伺服器一鍵遍歷讀取存檔 [來源: " + Utf8ToWide(sourceDesc) + L"] (目標玩家: " + Utf8ToWide(defPid) + L", 共 " + std::to_wstring(keys.size()) + L" 筆變數)...");
+    AppendLog(L"[*] 開始遍歷插件快取 [來源: " + Utf8ToWide(sourceDesc) + L"] (玩家 handle: " + Utf8ToWide(defPid) + L", 共 " + std::to_wstring(keys.size()) + L" 筆 Key)...");
 
     int count = 0;
     for (size_t i = 0; i < keys.size(); ++i) {
         if (!g_isBatchReading) break;
         const std::string& k = keys[i];
         std::string cmd = "GET:" + defPid + ":" + k;
-        if (SendPipeCommand(cmd)) {
+        if (ValidateSaveCommand(defPid,k,"",false) && SendPipeCommand(cmd)) {
             count++;
         }
         Sleep(15);
     }
 
-    AppendLog(L"[+] 遍歷讀取請求發送完畢！共向伺服器查詢 " + std::to_wstring(count) + L" 筆變數，數值將即時顯示於「存檔即時監控」列表中。");
-    MessageBoxW(g_hWnd, (L"遍歷讀取請求發送完成！共向伺服器查詢 " + std::to_wstring(count) + L" 筆存檔變數。\n[來源: " + Utf8ToWide(sourceDesc) + L"]\n\n數值將於數秒內陸續在「存檔即時監控」列表中呈現。").c_str(), L"遍歷讀取完成", MB_ICONINFORMATION);
+    AppendLog(L"[讀取] 已送出 " + std::to_wstring(count) + L" 筆插件快取讀取請求。空值／缺少的 Key 不一定代表平台無資料。");
+    MessageBoxW(g_hWnd, (L"已送出 " + std::to_wstring(count) + L" 筆插件快取讀取請求。\n[來源: " + Utf8ToWide(sourceDesc) + L"]\n數值會顯示於監控列表；若要查平台最新值，請在遊戲內重新載入資料。").c_str(), L"讀取請求完成", MB_ICONINFORMATION);
     g_isBatchReading = false;
     return 0;
 }
@@ -558,7 +561,7 @@ void ExecuteQuickSave(const std::string& rawText) {
         if (line.empty() || line[0] == '#' || line[0] == ';') continue;
 
         std::string pid, key, val;
-        if (ParseSaveLine(line, defPid, pid, key, val)) {
+        if (ParseSaveLine(line, defPid, pid, key, val) && ValidateSaveCommand(pid,key,val,true)) {
             lastParsedPid = pid;
             lastParsedKey = key;
             lastParsedVal = val;
@@ -566,27 +569,7 @@ void ExecuteQuickSave(const std::string& rawText) {
             std::string payload = "SAVE:" + pid + ":" + key + ":" + val;
             if (SendPipeCommand(payload)) {
                 successCount++;
-                AppendLog(L"[存檔寫入] 發送成功: " + Utf8ToWide(pid) + L":" + Utf8ToWide(key) + L"=" + Utf8ToWide(val));
-
-                // Also update Save Monitor immediately
-                auto now = std::chrono::system_clock::now();
-                auto in_time_t = std::chrono::system_clock::to_time_t(now);
-                struct tm tmbuf;
-                localtime_s(&tmbuf, &in_time_t);
-                wchar_t timeBuf[32];
-                wcsftime(timeBuf, sizeof(timeBuf) / sizeof(wchar_t), L"%H:%M:%S", &tmbuf);
-
-                SaveRecord rec;
-                rec.time = timeBuf;
-                rec.action = L"手動寫入 (SET)";
-                rec.player = Utf8ToWide(pid);
-                rec.key = Utf8ToWide(key);
-                rec.val = Utf8ToWide(val);
-
-                EnterCriticalSection(&g_saveMonitorCs);
-                g_pendingSaveRecords.push_back(rec);
-                LeaveCriticalSection(&g_saveMonitorCs);
-                PostMessage(g_hWnd, WM_USER_UPDATE_SAVE_LIST, 0, 0);
+                AppendLog(L"[存檔寫入] 已送出，待核心回報: " + Utf8ToWide(pid) + L":" + Utf8ToWide(key));
 
                 Sleep(15);
             } else {
@@ -607,7 +590,7 @@ void ExecuteQuickSave(const std::string& rawText) {
     }
 
     if (successCount > 0) {
-        std::wstring msg = L"成功發送 " + std::to_wstring(successCount) + L" 筆存檔寫入指令！";
+        std::wstring msg = L"已送出 " + std::to_wstring(successCount) + L" 筆寫入請求；請查看日誌 Native result，並重新載入確認平台值。";
         if (failCount > 0) msg += L"\n(無法發送 " + std::to_wstring(failCount) + L" 筆)";
         MessageBoxW(g_hWnd, msg.c_str(), L"寫入結果", MB_ICONINFORMATION);
     } else if (failCount > 0) {
@@ -818,9 +801,57 @@ void LoadExistingSavesFromFile() {
     }
 }
 
+// Snapshots capture the displayed last-observed state; they never write to the game.
+std::wstring SnapshotCell(int row, int column) {
+    for (int capacity = 256; capacity <= 1048576; capacity *= 2) {
+        std::vector<wchar_t> buffer(capacity);
+        LVITEMW item{}; item.iSubItem = column; item.pszText = buffer.data(); item.cchTextMax = capacity;
+        int length = (int)SendMessageW(g_hListSaveMonitor, LVM_GETITEMTEXTW, row, (LPARAM)&item);
+        if (length < capacity - 1) return std::wstring(buffer.data(), length);
+    }
+    return L"";
+}
+void SaveSnapshotOrCompare(bool compare) {
+    OnUpdateSaveList();
+    SaveDiff::Snapshot current;
+    for (int i=0; i<ListView_GetItemCount(g_hListSaveMonitor); ++i) {
+        auto player=WideToUtf8(SnapshotCell(i,2)), key=WideToUtf8(SnapshotCell(i,3));
+        if (!player.empty() && !key.empty()) current[{player,key}]=WideToUtf8(SnapshotCell(i,4));
+    }
+    if (current.empty()) {
+        MessageBoxW(g_hWnd,L"目前沒有存檔觀測資料。請先讀取存檔並等待列表更新。",L"存檔快照",MB_ICONINFORMATION); return;
+    }
+    wchar_t path[32768]{};
+    OPENFILENAMEW dialog{}; dialog.lStructSize=sizeof(dialog); dialog.hwndOwner=g_hWnd;
+    dialog.lpstrFilter=L"存檔快照 (*.w3snapshot)\0*.w3snapshot\0所有檔案\0*.*\0";
+    dialog.lpstrFile=path; dialog.nMaxFile=32768; dialog.lpstrDefExt=L"w3snapshot";
+    dialog.lpstrTitle=compare ? L"選擇操作前的快照" : L"儲存目前存檔快照";
+    dialog.Flags=OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|(compare ? OFN_FILEMUSTEXIST : OFN_OVERWRITEPROMPT);
+    if (!(compare ? GetOpenFileNameW(&dialog) : GetSaveFileNameW(&dialog))) return;
+    if (!compare) {
+        std::ofstream out(path,std::ios::binary);
+        SaveDiff::Write(out,current); out.flush();
+        if (!out) { MessageBoxW(g_hWnd,L"無法寫入快照檔案。",L"錯誤",MB_ICONERROR); return; }
+        AppendLog(L"[快照] 已保存 " + std::to_wstring(current.size()) + L" 筆：" + path); return;
+    }
+    std::ifstream in(path,std::ios::binary); SaveDiff::Snapshot before;
+    if (!SaveDiff::Read(in,before)) { MessageBoxW(g_hWnd,L"快照格式不正確或檔案損毀。",L"錯誤",MB_ICONERROR); return; }
+    std::wstring report=std::wstring(path)+L".diff-"+std::to_wstring(GetTickCount64())+L".html";
+    std::ofstream out(report,std::ios::binary); out << SaveDiff::Report(before,current); out.flush();
+    if (!out) { MessageBoxW(g_hWnd,L"無法寫入比較報告。",L"錯誤",MB_ICONERROR); return; }
+    out.close();
+    AppendLog(L"[快照] 差異報告："+report);
+    ShellExecuteW(g_hWnd,L"open",report.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+}
+
 // Refresh selected unit attributes & player resources in Tab 1
 void RefreshMemoryTab(bool force = false) {
     if (!g_hWnd) return;
+    WebController::InitMemoryController();
+    struct MemoryReadGuard {
+        MemoryReadGuard() { EnterCriticalSection(&WebController::g_memCs); }
+        ~MemoryReadGuard() { LeaveCriticalSection(&WebController::g_memCs); }
+    } memoryReadGuard;
     HWND hFocus = GetFocus();
 
     // 1. Refresh Selected Unit
@@ -1131,6 +1162,11 @@ LRESULT CALLBACK EditPercentSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
 // Periodic Status Check (War3 process, DLL injection, Pipe)
 void UpdateStatus() {
     DWORD pid = FindProcessId();
+    static DWORD pipePid = 0;
+    if (pid != pipePid) {
+        DisconnectPipe();
+        pipePid = pid;
+    }
     if (pid != 0) {
         SetWindowTextW(g_hLblWar3, (L"魔獸進程: ● 運行中 (PID: " + std::to_wstring(pid) + L")").c_str());
         
@@ -1160,7 +1196,7 @@ void UpdateStatus() {
 
     bool pipeOk = ConnectPipe();
     if (pipeOk) {
-        SetWindowTextW(g_hLblPipe, L"IPC 管道: ● 已連線 (雙向串流中)");
+        SetWindowTextW(g_hLblPipe, L"IPC 管道: ● 已連線 (指令傳送就緒)");
     } else {
         SetWindowTextW(g_hLblPipe, L"IPC 管道: ○ 未連線");
     }
@@ -1362,10 +1398,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         g_hBtnClearSaveList = addTab0(CreateWindowW(L"BUTTON", L"清空", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             850, 222, 52, 26, hWnd, (HMENU)IDC_BTN_CLEAR_SAVE_LIST, NULL, NULL));
 
+        addTab0(CreateWindowW(L"BUTTON", L"儲存快照（操作前）", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            28, 252, 180, 28, hWnd, (HMENU)1130, NULL, NULL));
+        addTab0(CreateWindowW(L"BUTTON", L"與快照比較（操作後）", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            216, 252, 195, 28, hWnd, (HMENU)1131, NULL, NULL));
+        addTab0(CreateWindowW(L"STATIC", L"先等待存檔讀取完成，再儲存／比較最後觀測值", WS_CHILD | WS_VISIBLE,
+            425, 258, 470, 22, hWnd, NULL, NULL, NULL));
+
         // Save Monitor ListView
         g_hListSaveMonitor = addTab0(CreateWindowW(WC_LISTVIEWW, L"",
             WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_VSCROLL,
-            28, 252, 874, 465, hWnd, (HMENU)IDC_LIST_SAVE_MONITOR, NULL, NULL));
+            28, 286, 874, 431, hWnd, (HMENU)IDC_LIST_SAVE_MONITOR, NULL, NULL));
         ListView_SetExtendedListViewStyle(g_hListSaveMonitor, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
 
         LVCOLUMNW lvc{};
@@ -1462,8 +1505,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             42, 518, 411, 32, hWnd, (HMENU)IDC_BTN_MEM_STATS, NULL, NULL));
         SendMessage(g_hBtnAllStats, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
-        addTab1(CreateWindowW(L"STATIC", L"💡 使用技巧：\n1. 在遊戲中滑鼠點選英雄或任何單位，面板將自動即時同步數據。\n2.「無敵鎖血」會啟用背景守護線程，在遊戲中始終保持 HP/MP 最大值。\n3. 移速最高支援魔獸上限 522 滿速，亦可自訂輸入設定。",
-            WS_CHILD | SS_LEFT, 42, 560, 411, 140, hWnd, NULL, NULL, NULL));
+        // Blink Button
+        g_hBtnMemBlink = addTab1(CreateWindowW(L"BUTTON", L"⚡ 準備閃現（遊戲內 Ctrl+B）", WS_CHILD | BS_PUSHBUTTON,
+            42, 557, 411, 32, hWnd, (HMENU)IDC_BTN_MEM_BLINK, NULL, NULL));
+        SendMessage(g_hBtnMemBlink, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
+
+        addTab1(CreateWindowW(L"STATIC", L"💡 使用技巧：\n1. 在遊戲中滑鼠點選英雄或任何單位，面板將自動即時同步數據。\n2.「無敵鎖血」會啟用背景守護線程，在遊戲中始終保持 HP/MP 最大值。\n3. 移速最高支援魔獸上限 522 滿速，亦可自訂輸入設定。\n4.「閃現」：選中單位，滑鼠移到目標位置按 Ctrl+B。\n5.「英雄三屬性」：選中英雄按 Ctrl+H，各設為 1 億。",
+            WS_CHILD | SS_LEFT, 42, 597, 411, 150, hWnd, NULL, NULL, NULL));
 
         // Right Panel: Resources Groupbox
         HWND hGrpRes = addTab1(CreateWindowW(L"BUTTON", L"【玩家資源修改 (黃金 & 木材)】", WS_CHILD | BS_GROUPBOX,
@@ -1869,6 +1917,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             CopySelectedSaveItem();
             break;
 
+        case 1130: SaveSnapshotOrCompare(false); break;
+        case 1131: SaveSnapshotOrCompare(true); break;
         case IDC_BTN_RELOAD_SAVE:
             LoadExistingSavesFromFile();
             break;
@@ -2194,6 +2244,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 AppendLog(L"[-] 找不到 dztrace.log！");
             } else {
                 ShellExecuteA(hWnd, "open", "notepad.exe", tracePath.c_str(), NULL, SW_SHOWNORMAL);
+            }
+            break;
+        }
+
+        case IDC_BTN_MEM_BLINK: {
+            if (SendPipeCommand("BLINK:-1:-1")) {
+                AppendLog(L"[Blink] 請切回遊戲，選取單位，將滑鼠移到目標地面後按 Ctrl+B；可移動鏡頭到遠處再閃現。");
+            } else {
+                AppendLog(L"[Blink] 管道未連線，請先注入 DLL。");
             }
             break;
         }

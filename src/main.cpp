@@ -5,6 +5,59 @@
 #include <fstream>
 #include <map>
 #include <vector>
+#include <cstring>
+
+bool CopyToClipboard(const std::string& value) {
+    if (!OpenClipboard(nullptr)) return false;
+    EmptyClipboard();
+    HGLOBAL buffer = GlobalAlloc(GMEM_MOVEABLE, value.size() + 1);
+    if (!buffer) { CloseClipboard(); return false; }
+    void* address = GlobalLock(buffer);
+    if (!address) { GlobalFree(buffer); CloseClipboard(); return false; }
+    memcpy(address, value.c_str(), value.size() + 1);
+    GlobalUnlock(buffer);
+    if (!SetClipboardData(CF_TEXT, buffer)) { GlobalFree(buffer); CloseClipboard(); return false; }
+    CloseClipboard();
+    return true;
+}
+
+std::wstring ExeDirectory() {
+    wchar_t exe_path[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+    std::wstring path = exe_path;
+    size_t slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? L".\\" : path.substr(0, slash + 1);
+}
+
+std::string ToUtf8(const std::wstring& value) {
+    int size = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return {};
+    std::string result(size, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, &result[0], size, nullptr, nullptr);
+    result.pop_back();
+    return result;
+}
+
+bool PrepareLuaTraceModules(HANDLE pipe, std::wstring& game_dir) {
+    ULONG pid = 0;
+    if (!GetNamedPipeServerProcessId(pipe, &pid)) return false;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return false;
+    wchar_t game_path[MAX_PATH] = {};
+    DWORD length = MAX_PATH;
+    bool found = QueryFullProcessImageNameW(process, 0, game_path, &length) != FALSE;
+    CloseHandle(process);
+    if (!found) return false;
+    game_dir = game_path;
+    size_t slash = game_dir.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return false;
+    game_dir.resize(slash + 1);
+    const std::wstring source = ExeDirectory();
+    for (const wchar_t* name : {L"death_trace.lua", L"death_trace_stop.lua"}) {
+        if (!CopyFileW((source + name).c_str(), (game_dir + name).c_str(), FALSE)) return false;
+    }
+    return true;
+}
 
 void PrintMenu() {
     std::cout << "========================================================\n";
@@ -19,7 +72,10 @@ void PrintMenu() {
     std::cout << "  !percent <1~100>  : 設定商城隨機開啟百分比 (僅模式3生效)\n";
     std::cout << "  !reload           : 重新載入 mall_spoof.txt 與 mall_blacklist.txt\n\n";
     std::cout << " [單位操作]\n";
-    std::cout << "  !kill             : 秒殺當前選取的單位 (HP歸零) (遊戲內熱鍵: Ctrl+K)\n\n";
+    std::cout << "  !kill             : 以遊戲 KillUnit 原生函式殺死選取單位 (Ctrl+K)\n\n";
+    std::cout << "  !hero100m         : 選取英雄的力量／敏捷／智慧各設為 1 億 (Ctrl+H)\n";
+    std::cout << "  !luatrace         : 部署 Lua 死亡/掉寶追蹤模組並複製啟動指令\n";
+    std::cout << "  !luatrace stop    : 複製停止 Lua 追蹤指令\n\n";
     std::cout << " [動態 Native 呼叫]\n";
     std::cout << "  !<Native名稱> <參數1> <參數2> ... (例: !SuicideUnit 123 456)\n";
     std::cout << "  !help             : 重新顯示此選單\n";
@@ -110,7 +166,26 @@ int main() {
         }
         if (input.empty()) continue;
         
-        if (input == "!kill" || input == "!killselected") {
+        if (input == "!luatrace" || input == "!luatrace stop") {
+            std::wstring game_dir;
+            if (!PrepareLuaTraceModules(hPipe, game_dir)) {
+                std::cout << "[LuaTrace] 無法部署模組到遊戲資料夾；請確認遊戲路徑與檔案權限。\n";
+                continue;
+            }
+            const bool stop = input == "!luatrace stop";
+            const std::string command = stop ? "exec-lua:death_trace_stop" : "exec-lua:death_trace";
+            const std::string request = stop ? "LUA_TRACE_STOP\n" : "LUA_TRACE_START\n";
+            DWORD written = 0;
+            bool sent = WriteFile(hPipe, request.data(), (DWORD)request.size(), &written, nullptr) != FALSE && written == request.size();
+            std::cout << (sent ? "[LuaTrace] 已請求遊戲內 Lua 引擎載入模組。" : "[LuaTrace] 自動啟動失敗。")
+                      << (CopyToClipboard(command) ? "備用指令已複製。\n" : "\n")
+                      << "紀錄位置：" << ToUtf8(game_dir) << "war3dev_death_trace.log；確認 READY 與 death_event=true。\n";
+            continue;
+        }
+        if (input == "!hero100m") {
+            input = "HERO_100M";
+        }
+        else if (input == "!kill" || input == "!killselected") {
             input = "KILL";
         }
         else if (input == "!help") {

@@ -1,5 +1,15 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.15)
 project(War3DevTool VERSION 2.0.0 LANGUAGES CXX)
+
+if(NOT WIN32)
+    message(FATAL_ERROR "War3DevTool requires Windows and the 32-bit MSVC toolchain.")
+endif()
+if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
+    message(FATAL_ERROR "Warcraft III 1.27 requires x86 binaries. Configure a new build directory with -A Win32.")
+endif()
+if(NOT MSVC)
+    message(FATAL_ERROR "War3DevTool requires MSVC for its x86 inline assembly and structured exception handling.")
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -45,3 +55,39 @@ if(MSVC)
     set_target_properties(War3DevToolUI PROPERTIES LINK_FLAGS "/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\"")
 endif()
 
+# Install the complete runnable package. Defaults are seeded only when absent;
+# rebuilding must not reset the user's current INI or map-specific lists.
+install(TARGETS War3JassDevTool JassHook Injector War3DevToolUI
+    RUNTIME DESTINATION . COMPONENT Runtime
+)
+install(FILES scripts/death_trace.lua scripts/death_trace_stop.lua DESTINATION . COMPONENT Runtime)
+install(SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/InstallDefaults.cmake"
+    COMPONENT Runtime
+)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(HookRegression tests/hook_regression.cpp)
+    target_link_libraries(HookRegression PRIVATE user32 kernel32)
+    add_test(NAME hook_regression COMMAND HookRegression)
+
+    add_library(InjectorPayload SHARED tests/injector_payload.cpp)
+    add_library(InjectorReject SHARED tests/injector_payload.cpp)
+    target_compile_definitions(InjectorReject PRIVATE REJECT_PAYLOAD)
+    add_executable(InjectorRegression tests/injector_regression.cpp)
+    target_link_libraries(InjectorRegression PRIVATE advapi32)
+    add_dependencies(InjectorRegression InjectorPayload InjectorReject)
+    add_test(NAME injector_regression COMMAND InjectorRegression)
+
+    add_executable(MemoryWebRegression tests/memory_web_regression.cpp src/Wc3Memory.cpp)
+    target_link_libraries(MemoryWebRegression PRIVATE ws2_32 advapi32 shell32 user32)
+    add_test(NAME memory_web_regression COMMAND MemoryWebRegression)
+    set_tests_properties(hook_regression injector_regression memory_web_regression
+        PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
+endif()
+
+
+if(BUILD_TESTING)
+    add_executable(SaveDiffRegression tests/save_diff_regression.cpp)
+    add_test(NAME save_diff_regression COMMAND SaveDiffRegression)
+endif()

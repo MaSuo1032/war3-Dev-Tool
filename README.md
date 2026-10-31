@@ -123,8 +123,11 @@ scripts\build.bat
 
 #### 即時控制
 ```text
-> kill         # 秒殺當前選取的單位
+> !kill        # 以 KillUnit 原生函式殺死選取單位；遊戲內 Ctrl+K
+> !hero100m    # 選取英雄的力量、敏捷、智慧各設為 1 億；遊戲內 Ctrl+H
 ```
+
+英雄屬性快捷鍵只接受已驗證的 Game.dll 版本，並會先確認選取的是英雄。[全圖敵對單位擊殺可行性與限制](diagnostics/hero-stats-and-mass-kill.md)已整理。
 
 ---
 

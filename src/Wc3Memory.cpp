@@ -48,16 +48,26 @@ uintptr_t WC3Resolver::getSelectedUnit() const {
 }
 
 uintptr_t WC3Resolver::gameMemoryAddress(int32_t index, const int32_t* reference) const {
-    if (index < 0 || !gameBase_) return 0;
+    if (!gameBase_ || index == -1) return 0;
     uint32_t thisGame = 0;
     if (!mem_.read(gameBase_ + WC3_127A::THIS_GAME_RVA, &thisGame) || !thisGame) return 0;
 
+    // Game.dll +0x37350 (1.27.0.52240): the sign bit selects one of
+    // two presence tables, each with a checked count and a -2 live tag.
+    const bool alternate = (static_cast<uint32_t>(index) & 0x80000000u) != 0;
+    const uint32_t slot = static_cast<uint32_t>(index) & 0x7fffffffu;
+    uint32_t count = 0;
+    if (!mem_.read(static_cast<uintptr_t>(thisGame) + (alternate ? 0x3C : 0x1C), &count) || slot >= count) return 0;
     uint32_t gameMemory = 0;
-    if (!mem_.read(static_cast<uintptr_t>(thisGame) + WC3_127A::GAME_TABLE_OFF, &gameMemory) || !gameMemory) return 0;
+    if (!mem_.read(static_cast<uintptr_t>(thisGame) + (alternate ? 0x2C : WC3_127A::GAME_TABLE_OFF), &gameMemory) || !gameMemory) return 0;
 
-    uintptr_t entryAddress = static_cast<uintptr_t>(gameMemory) + static_cast<uintptr_t>(index) * 8ULL + 4ULL;
+    const uint64_t entry64 = static_cast<uint64_t>(gameMemory) + static_cast<uint64_t>(slot) * 8;
+    if (entry64 + 8 > 0x100000000ULL) return 0;
+    const uintptr_t entryAddress = static_cast<uintptr_t>(entry64);
+    int32_t liveTag = 0;
+    if (!mem_.read(entryAddress, &liveTag) || liveTag != -2) return 0;
     uint32_t address1 = 0;
-    if (!mem_.read(entryAddress, &address1) || !address1) return 0;
+    if (!mem_.read(entryAddress + 4, &address1) || !address1 || !mem_.committed(address1)) return 0;
 
     if (reference) {
         int32_t ref = 0;
@@ -110,16 +120,22 @@ bool WC3Resolver::inspectResources(int playerId, ResourceInfo* info) const {
         return false;
     }
 
-    uintptr_t gameMemoryEntry = gameMemoryAddress(1);
-    if (!gameMemoryEntry) return false;
+    // GetPlayerState (+0x1E4080) resolves player + (state+4)*0x10
+    // via +0x39860: tags at wrapper+8/+0xC, value at presence+0x78.
+    // Gold and lumber are states 1 and 2. Heap allocation addresses are
+    // not stable, so deriving them from a 64KB page boundary is invalid.
+    uint32_t game = 0, player = 0;
+    if (!mem_.read(gameBase_ + WC3_127A::UNIT_LIST_RVA, &game) || !game ||
+        !mem_.read(static_cast<uintptr_t>(game) + WC3_127A::PLAYER_TABLE_OFF + (playerId - 1) * 4, &player) || !player) return false;
+    int32_t goldIndex = 0, goldRef = 0, lumberIndex = 0, lumberRef = 0;
+    if (!mem_.read(static_cast<uintptr_t>(player) + 0x58, &goldIndex) ||
+        !mem_.read(static_cast<uintptr_t>(player) + 0x5C, &goldRef) ||
+        !mem_.read(static_cast<uintptr_t>(player) + 0x68, &lumberIndex) ||
+        !mem_.read(static_cast<uintptr_t>(player) + 0x6C, &lumberRef)) return false;
+    const uintptr_t goldAddress = gameMemoryValueAddress(goldIndex, &goldRef);
+    const uintptr_t lumberAddress = gameMemoryValueAddress(lumberIndex, &lumberRef);
 
-    uintptr_t upperAddress = gameMemoryEntry & static_cast<uintptr_t>(0xFFFF0000u);
-    uintptr_t playerBase = WC3_127A::RESOURCE_BASES[playerId];
-
-    uintptr_t goldAddress = upperAddress + playerBase;
-    uintptr_t lumberAddress = goldAddress + WC3_127A::RESOURCE_LUMBER_OFF;
-
-    if (!mem_.committed(goldAddress) || !mem_.committed(lumberAddress)) {
+    if (!goldAddress || !lumberAddress || !mem_.committed(goldAddress) || !mem_.committed(lumberAddress)) {
         return false;
     }
 
