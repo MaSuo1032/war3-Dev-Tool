@@ -82,12 +82,10 @@ if(BUILD_TESTING)
     add_executable(MemoryWebRegression tests/memory_web_regression.cpp src/Wc3Memory.cpp)
     target_link_libraries(MemoryWebRegression PRIVATE ws2_32 advapi32 shell32 user32)
     add_test(NAME memory_web_regression COMMAND MemoryWebRegression)
-    set_tests_properties(hook_regression injector_regression memory_web_regression
-        PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
-endif()
 
-
-if(BUILD_TESTING)
     add_executable(SaveDiffRegression tests/save_diff_regression.cpp)
     add_test(NAME save_diff_regression COMMAND SaveDiffRegression)
+
+    set_tests_properties(hook_regression injector_regression memory_web_regression
+        PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
 endif()

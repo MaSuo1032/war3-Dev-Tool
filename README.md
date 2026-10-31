@@ -1,137 +1,66 @@
-# Warcraft III JASS & Native Dev Tool (v2.0)
+# war3DevTool
 
-現代化、高穩定性、模組化架構的魔獸爭霸 III (Patch 1.27a) JASS 虛擬機與 Native 底層研發、監控與存檔修改工具。
+Warcraft III 1.27（x86）的本機開發工具。專案提供注入 DLL、Windows 圖形介面、命令列控制台，以及針對存檔、單位與 DzAPI 的研究輔助功能。
 
----
+> 本工具依賴特定版本的 `Game.dll` 與 DzAPI 插件。部分操作會檢查二進位指紋；版本不符時會拒絕執行。建置與回歸測試無法取代在目標地圖中的實測。
 
-## 🌟 專案背景與重構理念 (v2.0 Architecture)
+## 專案結構
 
-在舊版本中，所有 Hook、通訊、商城偽裝、字串模擬與反作弊攔截邏輯全部堆疊在單一檔案中，造成高度耦合與偶發性記憶體崩潰。
-**v2.0 專案全面重啟**，採用分層模組化架構（Clean Layered Architecture），將各子系統徹底解耦，提供企業級的程式碼品質與執行期穩定性：
+| 路徑 | 用途 |
+| --- | --- |
+| `src/JassHook.cpp` | 注入 DLL、Native 註冊與 Hook、命名管道服務、遊戲內快捷鍵 |
+| `src/gui.cpp`、`src/Wc3Memory.*` | GUI、存檔快照、單位與資源控制 |
+| `src/main.cpp` | 命令列控制台 |
+| `src/injector.cpp` | 獨立注入器 |
+| `src/*.h` | 共用解析、安全檢查、通訊及 GUI 元件 |
+| `config/` | 初次安裝時複製的預設設定；使用者修改位於 `bin/` 的副本 |
+| `scripts/` | 建置、啟動、Lua 模組及研究工具 |
+| `tests/` | 可在未啟動遊戲時執行的回歸測試 |
+| `diagnostics/` | 功能研究、限制與操作紀錄；見[文件索引](diagnostics/README.md) |
+| `build/`、`bin/` | 本機建置與執行目錄，Git 不追蹤 |
 
-```
-war3DevTool/
-├── config/             # 外部動態設定檔 (商城模式、等級、黑白名單)
-├── scripts/            # 一鍵編譯與啟動腳本
-├── src/                # JassHook.dll 核心源碼
-│   ├── Common/         # 全域設定與執行緒安全日誌 (Logger, Config)
-│   ├── Core/           # 記憶體安全防護與 Trampoline Hook 引擎
-│   ├── Jass/           # JASS 類型還原、Native 註冊表與動態調度器
-│   ├── Game/           # 遊戲本體探針 (單位選取、防作弊結束保護)
-│   ├── Modules/        # 獨立業務插件 (商城偽裝、存檔攔截與寫入)
-│   ├── IPC/            # Named Pipe 跨行程通訊
-│   └── DllMain.cpp     # 乾淨的進入點與主執行緒訊息循環
-├── client/             # War3JassDevTool.exe 控制台 UI (支援視覺化面板)
-└── injector/           # Injector.exe 注入器
-```
+目前 DLL 與 GUI 的主要實作仍集中在各自的 `.cpp` 檔；上表描述實際檔案配置。
 
----
+## 建置與測試
 
-## 🔬 核心底層逆向研究成果
+需要 Windows、CMake 3.15 以上，以及具備 x86 C++ 工具鏈的 Visual Studio。必須以 **Win32** 架構建置。
 
-### 1. JASS 字串結構精確還原 (JassString)
-魔獸爭霸內部之字串並非單純 C-Style 字串，若直接傳入 `const char*` 會導致遊戲立即閃退崩潰。本專案精確還原底層記憶體佈局：
-* **外層結構 (`JassString`)**：偏移量 `+0x08` 指向內部字串資料節點。
-* **內層結構 (`JassStringData`)**：偏移量 `+0x00` 為引用計數，`+0x1C` 為實際以 `\0` 結尾之字元指標。
-* 核心模組 `JassTypes` 提供 `CreateFakeJassString` 與 `FreeFakeJassString`，保證手動寫入存檔時底層安全無崩潰。
-
-### 2. 伺服器字串 ID 安全解碼 (`<StringID: N>`)
-RPG 地圖存檔數值常以 StringPool 形式傳遞。透過特製的記憶體安全探針，能同時識別原始字串與 `0x10000` 以下的 StringID（例如 `<StringID: 1264>`），並在編輯器中無損保存與重寫。
-
-### 3. 動態蜜罐 (Honeypot) 陷阱過濾機制
-傳統黑名單作法每換一張地圖就必須重新尋找陷阱變數。經逆向分析 RPG 地圖反作弊邏輯：
-* **正規商城道具**：一律由大寫英文字母與數字組成（例如 `VIP1`, `BFK`, `CLNW`）。
-* **動態蜜罐道具**：由反作弊隨機字串引擎生成，**必包含小寫字母**（例如 `2d6cDMtOsa`）。
-* 本專案於 `MallSpoofer` 實作特徵模式過濾器，自動放行正常道具並強制攔截動態蜜罐，徹底解決各類地圖的作弊偵測。
-
-### 4. 防作弊遊戲結束保護 (Anti-GameOver Protection)
-當防作弊觸發時，地圖通常會調用多層結束函式：
-* 靜態 Hook：`EndGame`, `RestartGame`, `RemovePlayer`
-* 使用者控制保護：攔截 `EnableUserControl(false)`，確保鍵盤滑鼠操作權限不被剝奪
-* 戰役失敗彈窗攔截：動態攔截包含「敗」、「Defeat」、「作弊」、「Fail」等關鍵字的對話框（`DialogSetMessage`、`DialogAddQuitButton`、`DialogDisplay`），從根本阻止失敗視窗彈出。
-
-### 5. 主執行緒安全調度 (Main-Thread Marshaling)
-Named Pipe 通訊處於獨立背景執行緒，若跨執行緒直接操作魔獸內部狀態或調用 Native，必定發生競態衝突（Race Condition）。
-本專案掛鉤遊戲主視窗之 `WndProc`，跨執行緒請求透過自訂 Windows 訊息（`WM_WAR3_SAVE_SERVER`, `WM_WAR3_INVOKE_NATIVE`, `WM_WAR3_KILL_UNIT`）同步轉發至**遊戲主循環執行緒**中執行，確保 100% 執行緒安全。
-
----
-
-## 🛠️ 編譯與建置 (Build)
-
-### 環境需求
-* Windows 10 / 11
-* CMake 3.10+
-* Visual Studio 2019 / 2022 (安裝 C++ 桌面開發工作負載，支援 32-bit MSVC)
-
-### 一鍵編譯
-執行 `scripts` 目錄下的建置腳本：
-```cmd
-scripts\build.bat
-```
-編譯完成後，二進位檔會自動輸出至專案下的 `bin\` 目錄：
-* `bin\JassHook.dll`
-* `bin\War3JassDevTool.exe`
-* `bin\Injector.exe`
-* `bin\JassHookConfig.ini`
-* `bin\mall_blacklist.txt`
-* `bin\mall_spoof.txt`
-
----
-
-## 📖 使用指南
-
-### 1. 注入外掛
-1. 啟動魔獸爭霸 III (1.27a) 並載入目標地圖。
-2. 執行 `bin\Injector.exe`，程式將自動偵測 `war3.exe` 並注入 `JassHook.dll`。
-3. 注入後魔獸爭霸會伴隨開啟專屬監控主控台視窗。
-
-### 2. 開啟控制台
-執行 `bin\War3JassDevTool.exe`，成功連接命名管道後即可輸入指令：
-
-#### 存檔即時視覺化面板
-```text
-> panel
-```
-* 自動掃描地圖在背景載入的所有存檔 Key。
-* 自動彙整至 `save_panel.txt` 並用記事本開啟。
-* 在記事本中修改目標數值（例如將 `ISBB=100` 改為 `ISBB=99999`）並存檔。
-* 回到控制台輸入：
-```text
-> saveall
-```
-* 一鍵批次寫入所有修改數值至地圖！
-
-#### 單筆即時寫入
-```text
-> save 1048602 ISBB 99999
-> save 1048602 ISBB <StringID: 1264>
+```bat
+scripts\build.bat --no-pause
 ```
 
-#### 防結束保護開關
-```text
-> antiover 1   # 開啟防作弊遊戲結束保護
-> antiover 0   # 關閉保護
+腳本會設定 CMake、編譯 Release，然後安裝完整執行套件至 `bin/`。重新安裝會保留 `bin/` 已存在的 INI 與名單檔。可單獨執行測試：
+
+```bat
+ctest --test-dir build -C Release --output-on-failure
 ```
 
-#### 商城模式切換
-```text
-> mall 2       # 100% 全開商城道具
-> mall 1       # 白名單模式 (讀取 mall_spoof.txt)
-> mall 0       # 關閉商城偽裝
-> percent 30   # 隨機開啟 30% 商城道具 (避免全開失去遊戲性)
-```
+`memory_web_regression` 需要允許測試程式連線至本機 localhost。測試涵蓋 Hook、注入器、記憶體 Web 控制與存檔差異；不會啟動魔獸或驗證特定地圖的行為。
 
-#### 即時控制
-```text
-> !kill        # 以 KillUnit 原生函式殺死選取單位；遊戲內 Ctrl+K
-> !killall     # 本機分批擊殺全圖存活的敵對單位；遊戲內 Ctrl+Shift+K
-> !killall stop # 取消尚未執行的批次；遊戲內 Ctrl+Shift+X
-> !hero100m    # 選取英雄的力量、敏捷、智慧各設為 1 億；遊戲內 Ctrl+H
-```
+## 啟動
 
-全圖擊殺在按鍵當下建立單位快照，每 50 毫秒最多處理 16 隻，並在擊殺前重新確認單位種類、擁有者、敵對關係及生命值。只接受已核對的 1.27 `Game.dll`；效果僅在本機，連線對戰可能不同步。新生成的敵人需再執行一次。大量死亡可能觸發地圖的掉寶、存檔與其他死亡事件；此功能不會重置一次性旗標。詳細限制見[研究紀錄](diagnostics/hero-stats-and-mass-kill.md)。
+1. 啟動 1.27 遊戲並進入地圖。
+2. 執行 `scripts\run_gui.bat`，在 GUI 內注入並操作；或執行 `bin\Injector.exe` 注入後，再執行 `scripts\run_client.bat` 開啟命令列控制台。
+3. 修改 `bin/` 內的設定與名單；`config/` 是新安裝的預設值。
 
----
+更新 `JassHook.dll` 後，需重新啟動遊戲並重新注入。遊戲日誌、存檔面板與快照是執行時資料，請留在 `bin/` 或使用者選取的位置。
 
-## ⚖️ 授權條款 (License)
-本專案僅供逆向工程學術研究、安全測試與單機模組開發用途。
+## 常用操作
+
+| 功能 | 遊戲快捷鍵 | 控制台／GUI 指令框 |
+| --- | --- | --- |
+| 擊殺選取單位 | `Ctrl+K` | `!kill` |
+| 本機分批擊殺全圖敵人 | `Ctrl+Shift+K` | `!killall` |
+| 取消尚未執行的全圖擊殺 | `Ctrl+Shift+X` | `!killall stop` |
+| 選取單位閃現到滑鼠地面位置 | `Ctrl+B` | GUI 的閃現準備按鈕 |
+| 選取英雄三屬性各設為一億 | `Ctrl+H` | `!hero100m` |
+
+控制台另提供 `!panel`、`!saveall`、`!save <玩家 handle> <Key> <Value>`、`!mall <0..3>`、`!percent <1..100>`、`!reload` 與 `!luatrace`。輸入 `!help` 可查看當前指令清單。GUI 可讀取存檔快取、保存 `.w3snapshot` 並產生差異報告；[存檔差異說明](diagnostics/save-diff-usage.md)列出比較範圍。
+
+存檔讀取來自 DzAPI 插件快取；寫入 Native 回傳成功也不保證平台已持久化，詳見[存檔讀寫研究](diagnostics/save-io-research.md)。全圖擊殺只在本機執行，連線對戰可能不同步，也不會重置地圖的一次性掉落或存檔旗標，詳見[擊殺功能說明](diagnostics/hero-stats-and-mass-kill.md)。
+
+## 開發注意事項
+
+- `src/dz_registry.h` 由 `scripts/generate_dz_registry.py` 依已驗證的插件產生；更換插件版本時需重新核對入口與簽名。
+- DLL 的 Native 呼叫、注入器與記憶體欄位依賴 x86 ABI；不要直接改為 x64 建置。
+- 若某功能未出現在原始碼與控制台指令表，請勿依賴舊研究紀錄中的規劃內容。
