@@ -149,6 +149,27 @@ void TestKillDispatch() {
     CHECK(!DispatchSelectedKill(nullptr, TestKill));
     CHECK(!DispatchSelectedKill(TestSelected, nullptr));
 }
+static DWORD testType = 77, testOwner = 8;
+static int testEnemy = 1;
+static float testLife = 100.0f;
+DWORD __cdecl TestMassType(DWORD) { return testType; }
+DWORD __cdecl TestMassOwner(DWORD) { return testOwner; }
+int __cdecl TestMassEnemy(DWORD owner, DWORD player) { CHECK(owner == 8 && player == 1); return testEnemy; }
+DWORD __cdecl TestMassLife(DWORD) { DWORD bits; memcpy(&bits, &testLife, sizeof(bits)); return bits; }
+void TestMassKillFilter() {
+    MassKillNatives natives = {};
+    natives.typeId = TestMassType;
+    natives.owner = TestMassOwner;
+    natives.isEnemy = TestMassEnemy;
+    natives.life = TestMassLife;
+    const MassKillTarget target = {123, 8, 77};
+    CHECK(MassKillEligible(natives, target, 1));
+    testEnemy = 0; CHECK(!MassKillEligible(natives, target, 1)); testEnemy = 1;
+    testLife = 0.0f; CHECK(!MassKillEligible(natives, target, 1)); testLife = 100.0f;
+    testType = 78; CHECK(!MassKillEligible(natives, target, 1)); testType = 77;
+    testOwner = 9; CHECK(!MassKillEligible(natives, target, 1)); testOwner = 8;
+    CHECK(!MassKillEligible(natives, {0, 8, 77}, 1));
+}
 static float blinkX = 0, blinkY = 456;
 static int blinkCalls = 0;
 DWORD __cdecl TestSelected() { return blinkUnit; }
@@ -179,6 +200,7 @@ int main() {
     TestGuardedStringsAndPluginIdentity();
     TestBlink();
     TestKillDispatch();
+    TestMassKillFilter();
     if (failures) return 1;
     std::cout << "Hook regression passed: stack alignment, immutable thunks, registry capacity, full-instruction gateways.\n";
     return 0;

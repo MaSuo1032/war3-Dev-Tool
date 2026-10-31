@@ -8,6 +8,7 @@
 #include <string>
 #include <fstream>
 #include <sstream>
+#include <vector>
 #include "dz_registry.h"
 #include "SaveParser.h"
 #include "SaveCommand.h"
@@ -683,6 +684,179 @@ void KillSelectedUnit() {
     }
 }
 
+// Native wrappers verified against the registration table in the bundled
+// 1.27 Game.dll. Keep all calls on the game's window thread, as with !kill.
+using GroupCreateFn = DWORD (__cdecl *)();
+using GroupDestroyFn = void (__cdecl *)(DWORD);
+using GroupEnumRectFn = void (__cdecl *)(DWORD, DWORD, DWORD);
+using GroupFirstFn = DWORD (__cdecl *)(DWORD);
+using GroupRemoveFn = void (__cdecl *)(DWORD, DWORD);
+using RectRemoveFn = void (__cdecl *)(DWORD);
+using UnitHandleFn = DWORD (__cdecl *)(DWORD);
+using PlayerEnemyFn = int (__cdecl *)(DWORD, DWORD);
+using WidgetLifeFn = DWORD (__cdecl *)(DWORD);
+
+struct MassKillNatives {
+    GroupCreateFn createGroup;
+    GroupDestroyFn destroyGroup;
+    GroupEnumRectFn enumRect;
+    GroupFirstFn first;
+    GroupRemoveFn remove;
+    RectRemoveFn removeRect;
+    SelectedUnitFn worldBounds;
+    SelectedUnitFn localPlayer;
+    UnitHandleFn owner;
+    PlayerEnemyFn isEnemy;
+    WidgetLifeFn life;
+    UnitHandleFn typeId;
+    KillUnitFn kill;
+};
+struct MassKillTarget { DWORD handle, owner, typeId; };
+static MassKillNatives g_massKill = {};
+static std::vector<MassKillTarget> g_massTargets;
+static size_t g_massCursor = 0;
+static unsigned g_massKilled = 0;
+static DWORD g_massPlayer = 0;
+static HMODULE g_massGame = nullptr;
+constexpr UINT_PTR kMassKillTimer = 0x574B;
+constexpr size_t kMassKillBatch = 16;
+constexpr size_t kMassKillMaxUnits = 32768;
+
+static bool MassKillAlive(DWORD lifeBits) {
+    float life;
+    memcpy(&life, &lifeBits, sizeof(life));
+    return life > 0.405f; // Warcraft's native life threshold.
+}
+
+static bool MassKillEligible(const MassKillNatives& n, const MassKillTarget& target, DWORD player) {
+    return target.handle && target.owner && target.typeId &&
+           n.typeId(target.handle) == target.typeId &&
+           n.owner(target.handle) == target.owner &&
+           n.isEnemy(target.owner, player) &&
+           MassKillAlive(n.life(target.handle));
+}
+
+static void StopMassKill(HWND hwnd, const char* reason) {
+    KillTimer(hwnd, kMassKillTimer);
+    if (reason) {
+        char log[192];
+        _snprintf_s(log, sizeof(log), _TRUNCATE,
+                    "[KillAll] %s Killed %u / %u queued units.\n", reason,
+                    g_massKilled, static_cast<unsigned>(g_massTargets.size()));
+        ConsoleLog(log);
+    }
+    g_massTargets.clear();
+    g_massCursor = 0;
+    g_massKilled = 0;
+    g_massPlayer = 0;
+    g_massGame = nullptr;
+    g_massKill = {};
+}
+
+static bool ResolveMassKillNatives(HMODULE game, MassKillNatives& n) {
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(game);
+    if (!game || dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0x100000) return false;
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(reinterpret_cast<const BYTE*>(game) + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->FileHeader.Machine != IMAGE_FILE_MACHINE_I386 ||
+        nt->FileHeader.TimeDateStamp != 0x56bd0e1c || nt->OptionalHeader.SizeOfImage != 0xcd8000 ||
+        nt->OptionalHeader.CheckSum != 0xc96841) return false;
+    BYTE* base = reinterpret_cast<BYTE*>(game);
+    const BYTE frame[] = {0x55, 0x8b, 0xec};
+    auto entry = [&](DWORD rva) -> void* {
+        BYTE* p = base + rva;
+        return IsExecutableAddress(p, sizeof(frame)) && memcmp(p, frame, sizeof(frame)) == 0 ? p : nullptr;
+    };
+    // GetLocalPlayer uses a different prologue in this build.
+    const BYTE localPrefix[] = {0x56, 0x8b, 0x35};
+    BYTE* local = base + 0x1e3150;
+    if (!IsExecutableAddress(local, sizeof(localPrefix)) || memcmp(local, localPrefix, sizeof(localPrefix))) return false;
+    n.createGroup = reinterpret_cast<GroupCreateFn>(entry(0x1de080));
+    n.destroyGroup = reinterpret_cast<GroupDestroyFn>(entry(0x1df640));
+    n.enumRect = reinterpret_cast<GroupEnumRectFn>(entry(0x1e6a50));
+    n.first = reinterpret_cast<GroupFirstFn>(entry(0x1e0850));
+    n.remove = reinterpret_cast<GroupRemoveFn>(entry(0x1e6e30));
+    n.removeRect = reinterpret_cast<RectRemoveFn>(entry(0x1f2dd0));
+    n.worldBounds = reinterpret_cast<SelectedUnitFn>(entry(0x1e6810));
+    n.localPlayer = reinterpret_cast<SelectedUnitFn>(local);
+    n.owner = reinterpret_cast<UnitHandleFn>(entry(0x1e3ba0));
+    n.isEnemy = reinterpret_cast<PlayerEnemyFn>(entry(0x1e8090));
+    n.life = reinterpret_cast<WidgetLifeFn>(entry(0x1e6730));
+    n.typeId = reinterpret_cast<UnitHandleFn>(entry(0x1e6670));
+    n.kill = reinterpret_cast<KillUnitFn>(entry(0x1efcd0));
+    return n.createGroup && n.destroyGroup && n.enumRect && n.first && n.remove && n.removeRect &&
+           n.worldBounds && n.localPlayer && n.owner && n.isEnemy && n.life && n.typeId && n.kill;
+}
+
+static void StartMassKill(HWND hwnd) {
+    if (!g_massTargets.empty()) StopMassKill(hwnd, "Restarted.");
+    __try {
+        HMODULE game = GetModuleHandleA("Game.dll");
+        MassKillNatives n = {};
+        if (!ResolveMassKillNatives(game, n)) {
+            ConsoleLog("[KillAll] Unsupported or modified Game.dll; no action.\n"); return;
+        }
+        DWORD player = n.localPlayer();
+        DWORD rect = n.worldBounds();
+        if (!player || !rect) { ConsoleLog("[KillAll] No active local player or map.\n"); return; }
+        DWORD group = n.createGroup();
+        if (!group) { n.removeRect(rect); ConsoleLog("[KillAll] Could not create unit group.\n"); return; }
+        // A null boolexpr includes every unit. GetWorldBounds creates a rect
+        // handle, so release both temporary handles after enumeration.
+        n.enumRect(group, rect, 0);
+        bool truncated = false;
+        for (size_t i = 0; i < kMassKillMaxUnits; ++i) {
+            DWORD unit = n.first(group);
+            if (!unit) break;
+            n.remove(group, unit);
+            DWORD owner = n.owner(unit);
+            if (owner && n.isEnemy(owner, player) && MassKillAlive(n.life(unit))) {
+                DWORD typeId = n.typeId(unit);
+                if (typeId) g_massTargets.push_back({unit, owner, typeId});
+            }
+            if (i + 1 == kMassKillMaxUnits && n.first(group)) truncated = true;
+        }
+        n.destroyGroup(group);
+        n.removeRect(rect);
+        if (g_massTargets.empty()) { ConsoleLog("[KillAll] No living enemy units found.\n"); return; }
+        g_massKill = n;
+        g_massGame = game;
+        g_massPlayer = player;
+        g_massCursor = 0;
+        g_massKilled = 0;
+        if (!SetTimer(hwnd, kMassKillTimer, 50, nullptr)) {
+            StopMassKill(hwnd, "Timer unavailable."); return;
+        }
+        char log[192];
+        _snprintf_s(log, sizeof(log), _TRUNCATE,
+                    "[KillAll] Queued %u living enemy units%s; 16 per timer tick.\n",
+                    static_cast<unsigned>(g_massTargets.size()), truncated ? " (scan limit reached)" : "");
+        ConsoleLog(log);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        StopMassKill(hwnd, "Native call failed.");
+    }
+}
+
+static void StepMassKill(HWND hwnd) {
+    if (g_massTargets.empty()) return;
+    __try {
+        if (GetModuleHandleA("Game.dll") != g_massGame || g_massKill.localPlayer() != g_massPlayer) {
+            StopMassKill(hwnd, "Game or local player changed."); return;
+        }
+        size_t end = g_massCursor + kMassKillBatch;
+        if (end > g_massTargets.size()) end = g_massTargets.size();
+        for (; g_massCursor < end; ++g_massCursor) {
+            const MassKillTarget& target = g_massTargets[g_massCursor];
+            if (MassKillEligible(g_massKill, target, g_massPlayer)) {
+                g_massKill.kill(target.handle);
+                ++g_massKilled;
+            }
+        }
+        if (g_massCursor == g_massTargets.size()) StopMassKill(hwnd, "Finished.");
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        StopMassKill(hwnd, "Native call failed; some units may already be dead.");
+    }
+}
+
 // SetHeroStr/Agi/Int were matched to the Game.dll native-registration table
 // in the shipped 1.27 build. Use their wrappers so the game updates derived
 // stats instead of changing CAbilityHero fields directly.
@@ -796,10 +970,21 @@ void BlinkSelectedUnit(float screenX, float screenY) {
 LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     // In-game Hotkeys:
     //   Ctrl + K: Instant Kill selected unit
+    //   Ctrl + Shift + K: Kill every living enemy unit on this client
+    //   Ctrl + Shift + X: Cancel the queued mass kill
     //   Ctrl + B: Instant Blink selected unit to mouse cursor
     //   Ctrl + H: Set selected hero's three attributes to 100 million
     if (uMsg == WM_KEYDOWN) {
         bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (ctrlDown && shiftDown && wParam == 'K') {
+            if ((static_cast<DWORD>(lParam) & (1u << 30)) == 0) StartMassKill(hWnd);
+            return 0;
+        }
+        if (ctrlDown && shiftDown && wParam == 'X') {
+            StopMassKill(hWnd, "Cancelled.");
+            return 0;
+        }
         if (ctrlDown && wParam == 'K') {
             KillSelectedUnit();
             return 0;
@@ -885,6 +1070,19 @@ LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
         return 0;
     }
 
+    if (uMsg == WM_APP + 8) {
+        if (wParam) StopMassKill(hWnd, "Cancelled.");
+        else StartMassKill(hWnd);
+        return 0;
+    }
+
+    if (uMsg == WM_TIMER && wParam == kMassKillTimer) {
+        StepMassKill(hWnd);
+        return 0;
+    }
+
+    if (uMsg == WM_DESTROY && !g_massTargets.empty()) StopMassKill(hWnd, "Window closed.");
+
     if (uMsg == WM_APP + 1) {
         InvokeData* data = (InvokeData*)lParam;
         if (data) {
@@ -947,6 +1145,10 @@ void ProcessSingleCommand(const std::string& cmd) {
     else if (cmd == "HERO_100M") {
         if (g_gameHwnd) SendMessageA(g_gameHwnd, WM_APP + 7, 0, 0);
         else ConsoleLog("[HeroStats] Game window unavailable; request skipped.\n");
+    }
+    else if (cmd == "KILL_ALL_LOCAL" || cmd == "KILL_ALL_STOP") {
+        if (g_gameHwnd) SendMessageA(g_gameHwnd, WM_APP + 8, cmd == "KILL_ALL_STOP", 0);
+        else ConsoleLog("[KillAll] Game window unavailable; request skipped.\n");
     }
     else if (cmd == "KILL" || cmd == "!kill" || cmd == "!killselected") {
         if (g_gameHwnd) {

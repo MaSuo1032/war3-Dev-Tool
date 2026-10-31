@@ -72,7 +72,9 @@ void PrintMenu() {
     std::cout << "  !percent <1~100>  : 設定商城隨機開啟百分比 (僅模式3生效)\n";
     std::cout << "  !reload           : 重新載入 mall_spoof.txt 與 mall_blacklist.txt\n\n";
     std::cout << " [單位操作]\n";
-    std::cout << "  !kill             : 以遊戲 KillUnit 原生函式殺死選取單位 (Ctrl+K)\n\n";
+    std::cout << "  !kill             : 以遊戲 KillUnit 原生函式殺死選取單位 (Ctrl+K)\n";
+    std::cout << "  !killall          : 本機分批擊殺全圖敵對單位 (Ctrl+Shift+K)\n";
+    std::cout << "  !killall stop     : 取消尚未執行的擊殺 (Ctrl+Shift+X)\n";
     std::cout << "  !hero100m         : 選取英雄的力量／敏捷／智慧各設為 1 億 (Ctrl+H)\n";
     std::cout << "  !luatrace         : 部署 Lua 死亡/掉寶追蹤模組並複製啟動指令\n";
     std::cout << "  !luatrace stop    : 複製停止 Lua 追蹤指令\n\n";
@@ -184,6 +186,9 @@ int main() {
         }
         if (input == "!hero100m") {
             input = "HERO_100M";
+        }
+        else if (input == "!killall" || input == "!killall stop") {
+            input = input == "!killall" ? "KILL_ALL_LOCAL" : "KILL_ALL_STOP";
         }
         else if (input == "!kill" || input == "!killselected") {
             input = "KILL";

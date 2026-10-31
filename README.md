@@ -124,10 +124,12 @@ scripts\build.bat
 #### 即時控制
 ```text
 > !kill        # 以 KillUnit 原生函式殺死選取單位；遊戲內 Ctrl+K
+> !killall     # 本機分批擊殺全圖存活的敵對單位；遊戲內 Ctrl+Shift+K
+> !killall stop # 取消尚未執行的批次；遊戲內 Ctrl+Shift+X
 > !hero100m    # 選取英雄的力量、敏捷、智慧各設為 1 億；遊戲內 Ctrl+H
 ```
 
-英雄屬性快捷鍵只接受已驗證的 Game.dll 版本，並會先確認選取的是英雄。[全圖敵對單位擊殺可行性與限制](diagnostics/hero-stats-and-mass-kill.md)已整理。
+全圖擊殺在按鍵當下建立單位快照，每 50 毫秒最多處理 16 隻，並在擊殺前重新確認單位種類、擁有者、敵對關係及生命值。只接受已核對的 1.27 `Game.dll`；效果僅在本機，連線對戰可能不同步。新生成的敵人需再執行一次。大量死亡可能觸發地圖的掉寶、存檔與其他死亡事件；此功能不會重置一次性旗標。詳細限制見[研究紀錄](diagnostics/hero-stats-and-mass-kill.md)。
 
 ---
 

@@ -1059,6 +1059,10 @@ void ProcessUserCommand(const std::string& cmd) {
             AppendLog(L"[+] 已發送秒殺指令 (KILL)");
         }
     }
+    else if (c == "!killall" || c == "!killall stop") {
+        if (SendPipeCommand(c == "!killall" ? "KILL_ALL_LOCAL" : "KILL_ALL_STOP"))
+            AppendLog(c == "!killall" ? L"[+] 已開始分批擊殺全圖敵對單位" : L"[+] 已取消全圖擊殺");
+    }
     else if (c == "!panel") {
         GenerateAndOpenPanel();
     }
@@ -1510,7 +1514,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             42, 557, 411, 32, hWnd, (HMENU)IDC_BTN_MEM_BLINK, NULL, NULL));
         SendMessage(g_hBtnMemBlink, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
-        addTab1(CreateWindowW(L"STATIC", L"💡 使用技巧：\n1. 在遊戲中滑鼠點選英雄或任何單位，面板將自動即時同步數據。\n2.「無敵鎖血」會啟用背景守護線程，在遊戲中始終保持 HP/MP 最大值。\n3. 移速最高支援魔獸上限 522 滿速，亦可自訂輸入設定。\n4.「閃現」：選中單位，滑鼠移到目標位置按 Ctrl+B。\n5.「英雄三屬性」：選中英雄按 Ctrl+H，各設為 1 億。",
+        addTab1(CreateWindowW(L"STATIC", L"💡 使用技巧：\n1. 在遊戲中滑鼠點選英雄或任何單位，面板將自動即時同步數據。\n2.「無敵鎖血」會啟用背景守護線程，在遊戲中始終保持 HP/MP 最大值。\n3. 移速最高支援魔獸上限 522 滿速，亦可自訂輸入設定。\n4.「閃現」：選中單位，滑鼠移到目標位置按 Ctrl+B。\n5.「英雄三屬性」：選中英雄按 Ctrl+H，各設為 1 億。\n6.「全圖敵對擊殺」：Ctrl+Shift+K；Ctrl+Shift+X 取消。",
             WS_CHILD | SS_LEFT, 42, 597, 411, 150, hWnd, NULL, NULL, NULL));
 
         // Right Panel: Resources Groupbox
