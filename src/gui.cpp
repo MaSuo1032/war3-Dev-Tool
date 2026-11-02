@@ -134,6 +134,7 @@ WNDPROC g_oldEditPercentProc = NULL;
 WNDPROC g_oldEditQuickSaveProc = NULL;
 
 DWORD g_lastDetectedPid = 0;
+DWORD g_pendingAutoInjectPid = 0;
 bool g_isDllInjected = false;
 bool g_updatingSlider = false;
 
@@ -260,6 +261,13 @@ DWORD WINAPI LogTailerThread(LPVOID lpParam) {
                         // Detect Save Monitor events
                         if (line.find("[GetServerValue]") != std::string::npos ||
                             line.find("[SaveServerValue]") != std::string::npos ||
+                            (line.find("[DataAccess]") != std::string::npos &&
+                             (line.find("Direction: READ") != std::string::npos ||
+                              line.find("Direction: WRITE") != std::string::npos ||
+                              line.find("Direction: UNKNOWN") != std::string::npos)) ||
+                            (line.find("[ArchiveMonitor]") != std::string::npos &&
+                             (line.find("KKApiAddBatchSaveArchive") != std::string::npos ||
+                              line.find("DzAPI_Map_SaveServerArchive") != std::string::npos)) ||
                             line.find("[Stat_SetStat]") != std::string::npos ||
                             line.find("LOADED:") != std::string::npos ||
                             line.find("SAVED:") != std::string::npos) {
@@ -272,11 +280,31 @@ DWORD WINAPI LogTailerThread(LPVOID lpParam) {
                             }
                             std::string pid, key, val;
                             if (ParseSaveLine(line, defPid, pid, key, val)) {
+                                if (line.find("[DataAccess]") != std::string::npos &&
+                                    (key == "(null)" || val == "(null)")) continue;
                                 std::string actionStr = "存檔";
                                 if (line.find("GetServerValue") != std::string::npos || line.find("LOADED:") != std::string::npos) {
                                     actionStr = "讀取 (GET)";
+                                } else if (line.find("Direction: READ") != std::string::npos) {
+                                    actionStr = "伺服器/地圖讀取";
+                                } else if (line.find("Direction: WRITE") != std::string::npos) {
+                                    actionStr = "伺服器/地圖寫入";
+                                } else if (line.find("Direction: UNKNOWN") != std::string::npos) {
+                                    actionStr = "資料存取 (方向未分類)";
+                                } else if (line.find("DzAPI_Map_StoreString") != std::string::npos) {
+                                    actionStr = "StoreString (字串)";
+                                } else if (line.find("DzAPI_Map_StoreInteger") != std::string::npos) {
+                                    actionStr = "StoreInteger (整數)";
+                                } else if (line.find("DzAPI_Map_StoreReal") != std::string::npos) {
+                                    actionStr = "StoreReal (實數)";
+                                } else if (line.find("DzAPI_Map_StoreBoolean") != std::string::npos) {
+                                    actionStr = "StoreBoolean (布林)";
                                 } else if (line.find("SaveServerValue") != std::string::npos || line.find("SAVED:") != std::string::npos) {
                                     actionStr = "寫入 (SAVE)";
+                                } else if (line.find("KKApiAddBatchSaveArchive") != std::string::npos) {
+                                    actionStr = "批次存檔 (BATCH ADD)";
+                                } else if (line.find("DzAPI_Map_SaveServerArchive") != std::string::npos) {
+                                    actionStr = "伺服器封存 (ARCHIVE)";
                                 } else if (line.find("Stat_SetStat") != std::string::npos) {
                                     actionStr = "統計 (STAT)";
                                 }
@@ -769,8 +797,27 @@ void LoadExistingSavesFromFile() {
             if (detectedPid.empty() && !pid.empty()) detectedPid = pid;
 
             std::string actionStr = "讀取 (GET)";
-            if (line.find("SAVED:") != std::string::npos || line.find("SaveServerValue") != std::string::npos) {
+            if (line.find("[DataAccess]") != std::string::npos &&
+                (line.find("Direction: READ") != std::string::npos || line.find("Direction: WRITE") != std::string::npos ||
+                 line.find("Direction: UNKNOWN") != std::string::npos) &&
+                line.find("Key: \"(null)\"") == std::string::npos &&
+                line.find("Value: \"(null)\"") == std::string::npos) {
+                actionStr = line.find("Direction: READ") != std::string::npos ? "伺服器/地圖讀取" :
+                    line.find("Direction: WRITE") != std::string::npos ? "伺服器/地圖寫入" : "資料存取 (方向未分類)";
+            } else if (line.find("DzAPI_Map_StoreString") != std::string::npos) {
+                actionStr = "StoreString (字串)";
+            } else if (line.find("DzAPI_Map_StoreInteger") != std::string::npos) {
+                actionStr = "StoreInteger (整數)";
+            } else if (line.find("DzAPI_Map_StoreReal") != std::string::npos) {
+                actionStr = "StoreReal (實數)";
+            } else if (line.find("DzAPI_Map_StoreBoolean") != std::string::npos) {
+                actionStr = "StoreBoolean (布林)";
+            } else if (line.find("SAVED:") != std::string::npos || line.find("SaveServerValue") != std::string::npos) {
                 actionStr = "寫入 (SAVE)";
+            } else if (line.find("KKApiAddBatchSaveArchive") != std::string::npos) {
+                actionStr = "批次存檔 (BATCH ADD)";
+            } else if (line.find("DzAPI_Map_SaveServerArchive") != std::string::npos) {
+                actionStr = "伺服器封存 (ARCHIVE)";
             } else if (line.find("SET_STAT:") != std::string::npos || line.find("Stat_SetStat") != std::string::npos) {
                 actionStr = "統計 (STAT)";
             }
@@ -1178,6 +1225,10 @@ void UpdateStatus() {
         if (injected) {
             SetWindowTextW(g_hLblHook, L"核心 DLL: ● 已注入 (JassHook.dll)");
             g_isDllInjected = true;
+            if (g_pendingAutoInjectPid == pid) {
+                g_pendingAutoInjectPid = 0;
+                KillTimer(g_hWnd, IDT_TIMER_AUTO_INJECT);
+            }
         } else {
             SetWindowTextW(g_hLblHook, L"核心 DLL: ○ 未注入");
             g_isDllInjected = false;
@@ -1186,9 +1237,14 @@ void UpdateStatus() {
             if (SendMessage(g_hChkAutoInject, BM_GETCHECK, 0, 0) == BST_CHECKED) {
                 if (pid != g_lastDetectedPid) {
                     g_lastDetectedPid = pid;
-                    AppendLog(L"[自動注入] 偵測到魔獸爭霸啟動，正在注入 JassHook.dll ...");
-                    DoInject();
+                    g_pendingAutoInjectPid = pid;
+                    SetTimer(g_hWnd, IDT_TIMER_AUTO_INJECT, 3000, NULL);
+                    AppendLog(L"[自動注入] 偵測到魔獸爭霸，3 秒後注入 JassHook.dll ...");
                 }
+            } else {
+                g_pendingAutoInjectPid = 0;
+                g_lastDetectedPid = 0;
+                KillTimer(g_hWnd, IDT_TIMER_AUTO_INJECT);
             }
         }
     } else {
@@ -1196,6 +1252,8 @@ void UpdateStatus() {
         SetWindowTextW(g_hLblHook, L"核心 DLL: ○ 未注入");
         g_isDllInjected = false;
         g_lastDetectedPid = 0;
+        g_pendingAutoInjectPid = 0;
+        KillTimer(g_hWnd, IDT_TIMER_AUTO_INJECT);
     }
 
     bool pipeOk = ConnectPipe();
@@ -1745,6 +1803,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             }
             if (g_hTabMonitor && TabCtrl_GetCurSel(g_hTabMonitor) == 1) {
                 RefreshMemoryTab(false);
+            }
+        } else if (wParam == IDT_TIMER_AUTO_INJECT) {
+            KillTimer(hWnd, IDT_TIMER_AUTO_INJECT);
+            DWORD expectedPid = g_pendingAutoInjectPid;
+            g_pendingAutoInjectPid = 0;
+            if (expectedPid != 0 && SendMessage(g_hChkAutoInject, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+                FindProcessId() == expectedPid && !IsDllInjected(expectedPid, L"JassHook.dll")) {
+                AppendLog(L"[自動注入] 等待完成，開始注入 JassHook.dll ...");
+                DoInject();
             }
         }
         break;

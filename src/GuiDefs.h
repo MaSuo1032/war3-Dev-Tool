@@ -118,6 +118,7 @@
 #define IDC_BTN_MEM_BLINK         1126
 
 #define IDT_TIMER_STATUS          1
+#define IDT_TIMER_AUTO_INJECT     2
 #define WM_USER_UPDATE_SAVE_LIST  (WM_USER + 101)
 
 // Common Control Unicode helper wrappers (avoids ANSI macro mismatch in non-UNICODE builds)

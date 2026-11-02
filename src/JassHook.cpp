@@ -295,7 +295,9 @@ struct HookData {
     size_t patchSize = 0;
     bool isHooked = false;
 };
-HookData hkRegister, hkHasMallItem, hkSave, hkGet, hkLevel;
+HookData hkRegister, hkHasMallItem, hkSave, hkGet, hkLevel, hkExtraBoolean;
+HookData hkSavePublicArchive, hkGetPublicArchive, hkGetServerArchiveEquip, hkGetServerArchiveDrop;
+void* g_extraHandlerGateway = nullptr;
 
 bool IsExecutableAddress(const void* address, size_t size) {
     MEMORY_BASIC_INFORMATION info{};
@@ -419,14 +421,23 @@ int __cdecl Monitor_SaveServerValue(int player, DWORD key_ptr, DWORD value_ptr) 
         RecordDiscoveredKey(keyStr);
     }
 
-    char log[512];
+    const char* storeType = "SaveServerValue";
+    if (keyStr[0] && keyStr[1]) {
+        switch (keyStr[0]) {
+        case 'S': storeType = "DzAPI_Map_StoreString (prefix inferred)"; break;
+        case 'I': storeType = "DzAPI_Map_StoreInteger (prefix inferred)"; break;
+        case 'R': storeType = "DzAPI_Map_StoreReal (prefix inferred)"; break;
+        case 'B': storeType = "DzAPI_Map_StoreBoolean (prefix inferred)"; break;
+        }
+    }
+    char log[768];
 
     void* fn = hkSave.originalCallable;
     if (!fn) fn = FindNativeHandler("DzAPI_Map_SaveServerValue");
     if (!fn) { ConsoleLog("[Save] Handler not ready; load a map first.\n"); return 0; }
     typedef int(__cdecl *FuncType)(int, DWORD, DWORD);
     int accepted = ((FuncType)fn)(player, key_ptr, value_ptr);
-    _snprintf_s(log, sizeof(log), _TRUNCATE, "[SaveServerValue] Player: %d | Key: \"%s\" | Value: \"%s\" | Native result: %d\n", player, keyStr, valStr, accepted);
+    _snprintf_s(log, sizeof(log), _TRUNCATE, "[SaveServerValue] API: %s | Player: %d | Key: \"%s\" | Value: \"%s\" | Native result: %d\n", storeType, player, keyStr, valStr, accepted);
     ConsoleLog(log);
     AppendLuaSaveTrace(player, keyStr, valStr, accepted);
     if (!accepted) return accepted;
@@ -439,6 +450,57 @@ int __cdecl Monitor_SaveServerValue(int player, DWORD key_ptr, DWORD value_ptr) 
     }
 
     return accepted;
+}
+
+// All RequestExtra*Data JASS natives share a native handler entry. This
+// pre-call logger preserves the caller's registers/flags and jumps through the
+// trampoline, so Boolean/Integer/Real/String return conventions remain intact.
+extern "C" void __cdecl LogRequestExtraCall(int operation, int player, DWORD key_ptr,
+    DWORD value_ptr, int flag, int arg6, int arg7, int arg8) {
+    char keyBuffer[512], valueBuffer[2048];
+    const char* key = CopyJassString(key_ptr, keyBuffer, sizeof(keyBuffer)) ? keyBuffer : "(null)";
+    const char* value = CopyJassString(value_ptr, valueBuffer, sizeof(valueBuffer)) ? valueBuffer : "(null)";
+    const char* api = nullptr;
+    switch (operation) {
+    case 39: api = "DzAPI_Map_SaveServerArchive"; break;
+    case 38: api = "DzAPI_Map_GetServerArchive"; break;
+    case 102: api = "KKApiBeginBatchSaveArchive"; break;
+    case 103: api = "KKApiAddBatchSaveArchive"; break;
+    case 104: api = "KKApiEndBatchSaveArchive"; break;
+    default: break;
+    }
+    char log[1100];
+    const char* direction = operation == 38 ? "READ" :
+        (operation == 39 || operation == 103) ? "WRITE" :
+        (operation == 102 || operation == 104) ? "CONTROL" : "UNKNOWN";
+    if (operation == 38 && strcmp(value, "(null)") == 0) {
+        value = "(read request; native return not captured by shared-entry monitor)";
+    }
+    _snprintf_s(log, sizeof(log), _TRUNCATE,
+        "[DataAccess] Family: RequestExtra*Data | Direction: %s | API: %s | Player: %d | Operation: %d | Key: \"%s\" | Value: \"%s\" | Flag: %d | Args: %d,%d,%d\n",
+        direction, api ? api : "unknown operation", player, operation, key, value, flag, arg6, arg7, arg8);
+    ConsoleLog(log);
+}
+
+__declspec(naked) void Monitor_RequestExtraDataEntry() {
+    __asm {
+        pushfd
+        pushad
+        mov esi, [esp + 12] // ESP before pushad (after pushfd)
+        push dword ptr [esi + 36]
+        push dword ptr [esi + 32]
+        push dword ptr [esi + 28]
+        push dword ptr [esi + 24]
+        push dword ptr [esi + 20]
+        push dword ptr [esi + 16]
+        push dword ptr [esi + 12]
+        push dword ptr [esi + 8]
+        call LogRequestExtraCall
+        add esp, 32
+        popad
+        popfd
+        jmp dword ptr [g_extraHandlerGateway]
+    }
 }
 
 DWORD __cdecl Monitor_GetServerValue(int player, DWORD key_ptr) {
@@ -483,6 +545,61 @@ DWORD __cdecl Monitor_GetServerValue(int player, DWORD key_ptr) {
             fclose(fp);
         }
     }
+    return result;
+}
+
+int __cdecl Monitor_SavePublicArchive(int player, DWORD key_ptr, DWORD value_ptr) {
+    char kb[512], vb[2048];
+    const char* key = CopyJassString(key_ptr, kb, sizeof(kb)) ? kb : "(null)";
+    const char* value = CopyJassString(value_ptr, vb, sizeof(vb)) ? vb : "(null)";
+    auto fn = reinterpret_cast<int(__cdecl *)(int, DWORD, DWORD)>(hkSavePublicArchive.originalCallable);
+    int result = fn ? fn(player, key_ptr, value_ptr) : 0;
+    char log[1024];
+    _snprintf_s(log, sizeof(log), _TRUNCATE,
+        "[DataAccess] Family: DzAPI_Map_SavePublicArchive | Direction: WRITE | API: DzAPI_Map_SavePublicArchive | Player: %d | Key: \"%s\" | Value: \"%s\" | Native result: %d\n",
+        player, key, value, result);
+    ConsoleLog(log);
+    return result;
+}
+
+DWORD __cdecl Monitor_GetPublicArchive(int player, DWORD key_ptr) {
+    char kb[512], vb[2048];
+    const char* key = CopyJassString(key_ptr, kb, sizeof(kb)) ? kb : "(null)";
+    auto fn = reinterpret_cast<DWORD(__cdecl *)(int, DWORD)>(hkGetPublicArchive.originalCallable);
+    DWORD result = fn ? fn(player, key_ptr) : 0;
+    const char* value = CopyJassString(result, vb, sizeof(vb)) ? vb : "(null)";
+    char log[1024];
+    _snprintf_s(log, sizeof(log), _TRUNCATE,
+        "[DataAccess] Family: DzAPI_Map_GetPublicArchive | Direction: READ | API: DzAPI_Map_GetPublicArchive | Player: %d | Key: \"%s\" | Value: \"%s\"\n",
+        player, key, value);
+    ConsoleLog(log);
+    return result;
+}
+
+int __cdecl Monitor_GetServerArchiveEquip(int player, DWORD key_ptr) {
+    char kb[512];
+    const char* key = CopyJassString(key_ptr, kb, sizeof(kb)) ? kb : "(null)";
+    auto fn = reinterpret_cast<int(__cdecl *)(int, DWORD)>(hkGetServerArchiveEquip.originalCallable);
+    int result = fn ? fn(player, key_ptr) : 0;
+    char log[768];
+    _snprintf_s(log, sizeof(log), _TRUNCATE,
+        "[DataAccess] Family: DzAPI_Map_GetServerArchiveEquip | Direction: READ | API: DzAPI_Map_GetServerArchiveEquip | Player: %d | Key: \"%s\" | Value: \"%d\"\n",
+        player, key, result);
+    ConsoleLog(log);
+    return result;
+}
+
+DWORD __cdecl Monitor_GetServerArchiveDrop(int player, DWORD key_ptr) {
+    char kb[512], vb[2048];
+    const char* key = CopyJassString(key_ptr, kb, sizeof(kb)) ? kb : "(null)";
+    auto fn = reinterpret_cast<DWORD(__cdecl *)(int, DWORD)>(hkGetServerArchiveDrop.originalCallable);
+    DWORD result = fn ? fn(player, key_ptr) : 0;
+    const char* value = CopyJassString(result, vb, sizeof(vb)) ? vb : "(null)";
+    char log[1024];
+    _snprintf_s(log, sizeof(log), _TRUNCATE,
+        "[DataAccess] Family: DzAPI_Map_GetServerArchiveDrop | Direction: READ | API: DzAPI_Map_GetServerArchiveDrop | Player: %d | Key: \"%s\" | Value: \"%s\"\n",
+        player, key, value);
+    ConsoleLog(log);
     return result;
 }
 
@@ -1415,6 +1532,14 @@ void __fastcall HookedRegisterNative(void* func_ptr, const char* name, const cha
             hkSave.targetPtr = func_ptr; hkSave.originalCallable = func_ptr; final_ptr = reinterpret_cast<void*>(Monitor_SaveServerValue);
         } else if (strcmp(name, "DzAPI_Map_GetServerValue") == 0 && !hkGet.isHooked) {
             hkGet.targetPtr = func_ptr; hkGet.originalCallable = func_ptr; final_ptr = reinterpret_cast<void*>(Monitor_GetServerValue);
+        } else if (strcmp(name, "DzAPI_Map_SavePublicArchive") == 0) {
+            hkSavePublicArchive.targetPtr = func_ptr; hkSavePublicArchive.originalCallable = func_ptr; final_ptr = reinterpret_cast<void*>(Monitor_SavePublicArchive);
+        } else if (strcmp(name, "DzAPI_Map_GetPublicArchive") == 0) {
+            hkGetPublicArchive.targetPtr = func_ptr; hkGetPublicArchive.originalCallable = func_ptr; final_ptr = reinterpret_cast<void*>(Monitor_GetPublicArchive);
+        } else if (strcmp(name, "DzAPI_Map_GetServerArchiveEquip") == 0) {
+            hkGetServerArchiveEquip.targetPtr = func_ptr; hkGetServerArchiveEquip.originalCallable = func_ptr; final_ptr = reinterpret_cast<void*>(Monitor_GetServerArchiveEquip);
+        } else if (strcmp(name, "DzAPI_Map_GetServerArchiveDrop") == 0) {
+            hkGetServerArchiveDrop.targetPtr = func_ptr; hkGetServerArchiveDrop.originalCallable = func_ptr; final_ptr = reinterpret_cast<void*>(Monitor_GetServerArchiveDrop);
         } else if (strcmp(name, "DzAPI_Map_HasMallItem") == 0 && !hkHasMallItem.isHooked) {
             hkHasMallItem.targetPtr = func_ptr; hkHasMallItem.originalCallable = func_ptr; final_ptr = reinterpret_cast<void*>(Monitor_HasMallItem);
         } else if (strcmp(name, "DzAPI_Map_GetMapLevel") == 0) {
@@ -1422,6 +1547,10 @@ void __fastcall HookedRegisterNative(void* func_ptr, const char* name, const cha
         }
     }
     ReleaseSRWLockExclusive(&g_registryLock);
+    if (name && strncmp(name, "RequestExtra", 12) == 0 && !hkExtraBoolean.isHooked) {
+        InstallTrampolineHook(name, reinterpret_cast<void*>(Monitor_RequestExtraDataEntry), hkExtraBoolean);
+        g_extraHandlerGateway = hkExtraBoolean.originalCallable;
+    }
     OriginalRegisterNative(final_ptr, name, signature);
 }
 
@@ -1514,6 +1643,12 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
         InstallTrampolineHook("DzAPI_Map_HasMallItem", reinterpret_cast<void*>(Monitor_HasMallItem), hkHasMallItem);
         InstallTrampolineHook("DzAPI_Map_SaveServerValue", reinterpret_cast<void*>(Monitor_SaveServerValue), hkSave);
         InstallTrampolineHook("DzAPI_Map_GetServerValue", reinterpret_cast<void*>(Monitor_GetServerValue), hkGet);
+        InstallTrampolineHook("RequestExtraBooleanData", reinterpret_cast<void*>(Monitor_RequestExtraDataEntry), hkExtraBoolean);
+        g_extraHandlerGateway = hkExtraBoolean.originalCallable;
+        InstallTrampolineHook("DzAPI_Map_SavePublicArchive", reinterpret_cast<void*>(Monitor_SavePublicArchive), hkSavePublicArchive);
+        InstallTrampolineHook("DzAPI_Map_GetPublicArchive", reinterpret_cast<void*>(Monitor_GetPublicArchive), hkGetPublicArchive);
+        InstallTrampolineHook("DzAPI_Map_GetServerArchiveEquip", reinterpret_cast<void*>(Monitor_GetServerArchiveEquip), hkGetServerArchiveEquip);
+        InstallTrampolineHook("DzAPI_Map_GetServerArchiveDrop", reinterpret_cast<void*>(Monitor_GetServerArchiveDrop), hkGetServerArchiveDrop);
     } else {
         ConsoleLog(plugin ? "[JassHook] Unrecognized War3Plugin.dll version; static offsets disabled. Load a map to capture real native registrations.\n"
             : "[JassHook] War3Plugin.dll not loaded; waiting for actual native registrations on map load.\n");
