@@ -76,6 +76,12 @@ void PrintMenu() {
     std::cout << "  !killall          : 本機分批擊殺全圖敵對單位 (Ctrl+Shift+K)\n";
     std::cout << "  !killall stop     : 取消尚未執行的擊殺 (Ctrl+Shift+X)\n";
     std::cout << "  !hero100m         : 選取英雄的力量／敏捷／智慧各設為 1 億 (Ctrl+H)\n";
+    std::cout << "  !revive           : 立即嘗試復活本機已死亡英雄\n";
+    std::cout << "  !autorevive       : 監看並嘗試復活本機英雄；須在英雄仍在地圖時啟用\n";
+    std::cout << "  !autorevive stop  : 關閉本機自動復活\n";
+    std::cout << "  !item <ID> [1-6]  : 將物品 ID 放入選取角色第一個空格或指定空格 (例: !item I000 2)\n";
+    std::cout << "  !items           : 列出選取角色六格的物品 ID、名稱與使用次數\n";
+    std::cout << "  !compat          : 顯示 Game.dll、War3Plugin.dll 指紋及 Native 相容性\n";
     std::cout << "  !luatrace         : 部署 Lua 死亡/掉寶追蹤模組並複製啟動指令\n";
     std::cout << "  !luatrace stop    : 複製停止 Lua 追蹤指令\n\n";
     std::cout << " [動態 Native 呼叫]\n";
@@ -186,6 +192,27 @@ int main() {
         }
         if (input == "!hero100m") {
             input = "HERO_100M";
+        }
+        else if (input == "!revive") {
+            input = "REVIVE_LOCAL";
+        }
+        else if (input == "!autorevive" || input == "!autorevive stop") {
+            input = input == "!autorevive" ? "AUTO_REVIVE_START" : "AUTO_REVIVE_STOP";
+        }
+        else if (input == "!items") {
+            input = "ITEM_SCAN";
+        }
+        else if (input == "!compat") {
+            input = "COMPAT_CHECK";
+        }
+        else if (input == "!item" || input.rfind("!item ", 0) == 0) {
+            std::istringstream args(input.substr(5));
+            std::string id, slot, extra;
+            if (!(args >> id) || (args >> slot && (args >> extra))) {
+                std::cout << "用法: !item <四字元物品ID或0x十六進位ID> [空格1-6]\n";
+                continue;
+            }
+            input = "ITEM:" + id + (slot.empty() ? "" : ":" + slot);
         }
         else if (input == "!killall" || input == "!killall stop") {
             input = input == "!killall" ? "KILL_ALL_LOCAL" : "KILL_ALL_STOP";

@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <wincrypt.h>
 #include <stdint.h>
 #include <cstring>
 #include <cstdio>
@@ -10,6 +11,7 @@
 #include <sstream>
 #include <vector>
 #include "dz_registry.h"
+#include "DzRuntimeResolver.h"
 #include "SaveParser.h"
 #include "SaveCommand.h"
 #include "HookSafety.h"
@@ -19,6 +21,7 @@ wchar_t g_DllDirectory[MAX_PATH] = {0};
 
 const DWORD GAME_DLL_BASE = 0x6F000000;
 const DWORD REGISTER_NATIVE_RVA = 0x7E3710;
+static constexpr char kGameDllSha256[] = "e04d1716603c075eb0c8e1e21cf1093a664adc5249efab396bfa08d7b09d0c3a";
 
 typedef void(__fastcall *RegisterNative_t)(void* func_ptr, const char* name, const char* signature);
 RegisterNative_t OriginalRegisterNative = nullptr;
@@ -34,6 +37,8 @@ struct NativeEntry {
 };
 NativeEntry g_natives[kNativeCapacity];
 int g_nativeCount = 0;
+volatile LONG g_pluginResolutionMode = 0; // 0=waiting, 1=exact table, 2=runtime scan
+volatile LONG g_pluginResolutionCount = 0;
 
 HWND g_gameHwnd = NULL;
 WNDPROC OriginalWndProc = NULL;
@@ -756,11 +761,61 @@ struct BlinkData {
     float screenY;
 };
 
+struct ItemRequest {
+    DWORD typeId;
+    int slot; // -1 chooses the first empty slot; otherwise 0..5.
+};
+
+bool ParseItemRequest(const std::string& command, ItemRequest& request) {
+    if (command.rfind("ITEM:", 0) != 0) return false;
+    const std::string value = command.substr(5);
+    const size_t colon = value.find(':');
+    if (colon != std::string::npos && value.find(':', colon + 1) != std::string::npos) return false;
+    const std::string id = value.substr(0, colon);
+    const std::string slot = colon == std::string::npos ? "" : value.substr(colon + 1);
+    if (id.empty() || (colon != std::string::npos && slot.empty())) return false;
+    DWORD typeId = 0;
+    if (id.size() == 10 && id.compare(0, 2, "0x") == 0) {
+        for (size_t i = 2; i < id.size(); ++i) {
+            const char c = id[i];
+            unsigned digit = c >= '0' && c <= '9' ? c - '0' :
+                c >= 'A' && c <= 'F' ? c - 'A' + 10 :
+                c >= 'a' && c <= 'f' ? c - 'a' + 10 : 16;
+            if (digit == 16) return false;
+            typeId = (typeId << 4) | digit;
+        }
+    } else if (id.size() == 4) {
+        // Warcraft rawcodes are four ASCII bytes in display order.
+        for (unsigned char c : id) {
+            if (c < 33 || c > 126) return false;
+            typeId = (typeId << 8) | c;
+        }
+    } else {
+        if (id.size() > 10) return false;
+        unsigned long long decimal = 0;
+        for (char c : id) {
+            if (c < '0' || c > '9') return false;
+            decimal = decimal * 10 + (c - '0');
+            if (decimal > 0xffffffffULL) return false;
+        }
+        typeId = static_cast<DWORD>(decimal);
+    }
+    if (!typeId) return false;
+    int index = -1;
+    if (!slot.empty()) {
+        if (slot.size() != 1 || slot[0] < '1' || slot[0] > '6') return false;
+        index = slot[0] - '1';
+    }
+    request = {typeId, index};
+    return true;
+}
+
 // ==========================================
 // Game.dll 1.27 KillUnit native. Invoke the engine's death path, never a raw
 // health-field write (which can leave a live zero-HP unit).
 // ==========================================
 void* FindBlinkNative(const char* name, const char* signature);
+void ReportCompatibility();
 using SelectedUnitFn = DWORD (__cdecl *)();
 using KillUnitFn = void (__cdecl *)(DWORD);
 
@@ -798,6 +853,138 @@ void KillSelectedUnit() {
         else ConsoleLog("[Kill] No selected unit; no action.\n");
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         ConsoleLog("[Kill] Native call raised an exception; operation failed.\n");
+    }
+}
+
+void AddItemToSelectedUnit(const ItemRequest& request) {
+    __try {
+        auto selected = reinterpret_cast<SelectedUnitFn>(FindBlinkNative("DzGetSelectedLeaderUnit", "()Hunit;"));
+        HMODULE game = GetModuleHandleA("Game.dll");
+        if (!selected || !game) {
+            ConsoleLog("[Item] Map, selected-unit native, or Game.dll unavailable.\n"); return;
+        }
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(game);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0x100000) return;
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(reinterpret_cast<const BYTE*>(game) + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE || nt->FileHeader.Machine != IMAGE_FILE_MACHINE_I386 ||
+            nt->FileHeader.TimeDateStamp != 0x56bd0e1c || nt->OptionalHeader.SizeOfImage != 0xcd8000 ||
+            nt->OptionalHeader.CheckSum != 0xc96841) {
+            ConsoleLog("[Item] Unsupported Game.dll version; no item created.\n"); return;
+        }
+        BYTE* base = reinterpret_cast<BYTE*>(game);
+        const BYTE addPrefix[] = {0x55,0x8b,0xec,0x8b,0x4d,0x08,0x83,0xec,0x18};
+        const BYTE slotPrefix[] = {0x55,0x8b,0xec,0x8b,0x4d,0x08,0x56};
+        const BYTE typePrefix[] = {0x55,0x8b,0xec,0x8b,0x4d,0x08};
+        auto matches = [&](DWORD rva, const BYTE* bytes, size_t length) {
+            BYTE* entry = base + rva;
+            return IsExecutableAddress(entry, length) && memcmp(entry, bytes, length) == 0;
+        };
+        if (!matches(0x1fa7b0, addPrefix, sizeof(addPrefix)) ||
+            !matches(0x1faf50, slotPrefix, sizeof(slotPrefix)) ||
+            !matches(0x1e2cc0, typePrefix, sizeof(typePrefix))) {
+            ConsoleLog("[Item] Item native entries changed; no item created.\n"); return;
+        }
+        using ItemInSlotFn = DWORD (__cdecl *)(DWORD, int);
+        using AddItemFn = int (__cdecl *)(DWORD, DWORD, int);
+        using ItemTypeFn = DWORD (__cdecl *)(DWORD);
+        auto itemInSlot = reinterpret_cast<ItemInSlotFn>(base + 0x1faf50);
+        auto addItem = reinterpret_cast<AddItemFn>(base + 0x1fa7b0);
+        auto itemType = reinterpret_cast<ItemTypeFn>(base + 0x1e2cc0);
+        DWORD unit = selected();
+        if (!unit) { ConsoleLog("[Item] Select a unit with an inventory first.\n"); return; }
+        int slot = request.slot;
+        if (slot < 0) {
+            for (int i = 0; i < 6; ++i) {
+                if (!itemInSlot(unit, i)) { slot = i; break; }
+            }
+        }
+        if (slot < 0) { ConsoleLog("[Item] All six inventory slots are occupied.\n"); return; }
+        if (itemInSlot(unit, slot)) { ConsoleLog("[Item] Requested inventory slot is occupied.\n"); return; }
+        int accepted = addItem(unit, request.typeId, slot);
+        DWORD item = itemInSlot(unit, slot);
+        DWORD actualType = item ? itemType(item) : 0;
+        char log[240];
+        _snprintf_s(log, sizeof(log), _TRUNCATE,
+            "[Item] Requested ID 0x%08X in slot %d: native=%d, actual ID=0x%08X, unit=%u.\n",
+            request.typeId, slot + 1, accepted, actualType, unit);
+        ConsoleLog(log);
+        if (!accepted || actualType != request.typeId)
+            ConsoleLog("[Item] Item was not confirmed in the requested slot; check the map's item data and restrictions.\n");
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        ConsoleLog("[Item] Engine native raised an exception; inspect inventory before retrying.\n");
+    }
+}
+
+void ScanSelectedInventory() {
+    __try {
+        auto selected = reinterpret_cast<SelectedUnitFn>(FindBlinkNative("DzGetSelectedLeaderUnit", "()Hunit;"));
+        HMODULE game = GetModuleHandleA("Game.dll");
+        if (!selected || !game) {
+            ConsoleLog("[Inventory] Map, selected-unit native, or Game.dll unavailable.\n"); return;
+        }
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(game);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0x100000) return;
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(reinterpret_cast<const BYTE*>(game) + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE || nt->FileHeader.Machine != IMAGE_FILE_MACHINE_I386 ||
+            nt->FileHeader.TimeDateStamp != 0x56bd0e1c || nt->OptionalHeader.SizeOfImage != 0xcd8000 ||
+            nt->OptionalHeader.CheckSum != 0xc96841) {
+            ConsoleLog("[Inventory] Unsupported Game.dll version; scan refused.\n"); return;
+        }
+        BYTE* base = reinterpret_cast<BYTE*>(game);
+        const BYTE slotPrefix[] = {0x55,0x8b,0xec,0x8b,0x4d,0x08,0x56};
+        const BYTE sizePrefix[] = {0x55,0x8b,0xec,0x8b,0x4d,0x08,0x56};
+        const BYTE itemPrefix[] = {0x55,0x8b,0xec,0x8b,0x4d,0x08};
+        auto matches = [&](DWORD rva, const BYTE* bytes, size_t length) {
+            BYTE* entry = base + rva;
+            return IsExecutableAddress(entry, length) && memcmp(entry, bytes, length) == 0;
+        };
+        if (!matches(0x1faf50, slotPrefix, sizeof(slotPrefix)) ||
+            !matches(0x1faee0, sizePrefix, sizeof(sizePrefix)) ||
+            !matches(0x1e2cc0, itemPrefix, sizeof(itemPrefix)) ||
+            !matches(0x1e2c20, itemPrefix, sizeof(itemPrefix)) ||
+            !matches(0x1e2be0, itemPrefix, sizeof(itemPrefix))) {
+            ConsoleLog("[Inventory] Item native entries changed; scan refused.\n"); return;
+        }
+        using ItemInSlotFn = DWORD (__cdecl *)(DWORD, int);
+        using UnitInventorySizeFn = int (__cdecl *)(DWORD);
+        using ItemValueFn = DWORD (__cdecl *)(DWORD);
+        auto itemInSlot = reinterpret_cast<ItemInSlotFn>(base + 0x1faf50);
+        auto inventorySize = reinterpret_cast<UnitInventorySizeFn>(base + 0x1faee0);
+        auto itemType = reinterpret_cast<ItemValueFn>(base + 0x1e2cc0);
+        auto itemName = reinterpret_cast<ItemValueFn>(base + 0x1e2c20);
+        auto itemCharges = reinterpret_cast<ItemValueFn>(base + 0x1e2be0);
+        DWORD unit = selected();
+        if (!unit) { ConsoleLog("[Inventory] Select a unit first.\n"); return; }
+        int size = inventorySize(unit);
+        if (size < 0 || size > 6) { ConsoleLog("[Inventory] Unexpected inventory size; scan refused.\n"); return; }
+        char log[512];
+        _snprintf_s(log, sizeof(log), _TRUNCATE, "[Inventory] Unit=%u slots=%d\n", unit, size);
+        ConsoleLog(log);
+        for (int slot = 0; slot < 6; ++slot) {
+            DWORD item = slot < size ? itemInSlot(unit, slot) : 0;
+            if (!item) {
+                _snprintf_s(log, sizeof(log), _TRUNCATE, "[Inventory] Slot %d: empty\n", slot + 1);
+                ConsoleLog(log);
+                continue;
+            }
+            DWORD typeId = itemType(item);
+            char rawcode[5];
+            for (int i = 0; i < 4; ++i) {
+                unsigned char c = static_cast<unsigned char>(typeId >> (24 - i * 8));
+                rawcode[i] = c >= 33 && c <= 126 ? static_cast<char>(c) : '.';
+            }
+            rawcode[4] = '\0';
+            char name[192];
+            if (!CopyJassString(itemName(item), name, sizeof(name))) strcpy_s(name, "(unavailable)");
+            for (char* c = name; *c; ++c) if (*c == '\r' || *c == '\n' || *c == '\t') *c = ' ';
+            int charges = static_cast<int>(itemCharges(item));
+            _snprintf_s(log, sizeof(log), _TRUNCATE,
+                "[Inventory] Slot %d: ID=%s hex=0x%08X name=\"%s\" charges=%d\n",
+                slot + 1, rawcode, typeId, name, charges);
+            ConsoleLog(log);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        ConsoleLog("[Inventory] Engine native raised an exception; scan stopped.\n");
     }
 }
 
@@ -971,6 +1158,168 @@ static void StepMassKill(HWND hwnd) {
         if (g_massCursor == g_massTargets.size()) StopMassKill(hwnd, "Finished.");
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         StopMassKill(hwnd, "Native call failed; some units may already be dead.");
+    }
+}
+
+// Local, best-effort hero revival. The map can still run its own defeat
+// trigger before this window timer fires; this does not alter map globals.
+using RealUnitFn = DWORD (__cdecl *)(DWORD);
+using HeroTypeFn = int (__cdecl *)(DWORD);
+using ReviveHeroFn = int (__cdecl *)(DWORD, const float*, const float*, int);
+struct AutoReviveNatives {
+    MassKillNatives scan;
+    RealUnitFn x;
+    RealUnitFn y;
+    HeroTypeFn isHero;
+    ReviveHeroFn revive;
+};
+struct AutoReviveHero {
+    DWORD handle, owner, typeId;
+    float x, y;
+    bool attempted;
+};
+static AutoReviveNatives g_autoRevive = {};
+static std::vector<AutoReviveHero> g_autoReviveHeroes;
+static HMODULE g_autoReviveGame = nullptr;
+static DWORD g_autoRevivePlayer = 0;
+constexpr UINT_PTR kAutoReviveTimer = 0x5752;
+constexpr size_t kAutoReviveMaxUnits = 32768;
+
+static float RealFromBits(DWORD bits) {
+    float value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static bool ResolveAutoReviveNatives(HMODULE game, AutoReviveNatives& n) {
+    if (!ResolveMassKillNatives(game, n.scan)) return false;
+    BYTE* base = reinterpret_cast<BYTE*>(game);
+    const BYTE frame[] = {0x55, 0x8b, 0xec};
+    const BYTE heroPrefix[] = {0x55, 0x8b, 0xec, 0x8b, 0x45, 0x08};
+    auto entry = [&](DWORD rva, const BYTE* prefix, size_t length) -> void* {
+        BYTE* p = base + rva;
+        return IsExecutableAddress(p, length) && memcmp(p, prefix, length) == 0 ? p : nullptr;
+    };
+    n.x = reinterpret_cast<RealUnitFn>(entry(0x1e66b0, frame, sizeof(frame)));
+    n.y = reinterpret_cast<RealUnitFn>(entry(0x1e66f0, frame, sizeof(frame)));
+    n.isHero = reinterpret_cast<HeroTypeFn>(entry(0x1e7b50, heroPrefix, sizeof(heroPrefix)));
+    n.revive = reinterpret_cast<ReviveHeroFn>(entry(0x1f3300, frame, sizeof(frame)));
+    return n.x && n.y && n.isHero && n.revive;
+}
+
+static void StopAutoRevive(HWND hwnd, const char* reason) {
+    KillTimer(hwnd, kAutoReviveTimer);
+    g_autoReviveHeroes.clear();
+    g_autoRevive = {};
+    g_autoReviveGame = nullptr;
+    g_autoRevivePlayer = 0;
+    if (reason) {
+        char log[192];
+        _snprintf_s(log, sizeof(log), _TRUNCATE, "[AutoRevive] %s\n", reason);
+        ConsoleLog(log);
+    }
+}
+
+static bool AutoReviveSameHero(const AutoReviveNatives& n, const AutoReviveHero& hero) {
+    return hero.handle && hero.typeId && hero.owner &&
+        n.scan.typeId(hero.handle) == hero.typeId &&
+        n.scan.owner(hero.handle) == hero.owner && n.isHero(hero.typeId);
+}
+
+static void TryReviveHero(const AutoReviveNatives& n, AutoReviveHero& hero) {
+    if (!AutoReviveSameHero(n, hero)) return;
+    float life = RealFromBits(n.scan.life(hero.handle));
+    if (life > 0.405f) {
+        hero.x = RealFromBits(n.x(hero.handle));
+        hero.y = RealFromBits(n.y(hero.handle));
+        hero.attempted = false;
+        return;
+    }
+    if (hero.attempted) return;
+    hero.attempted = true;
+    int accepted = n.revive(hero.handle, &hero.x, &hero.y, TRUE);
+    float after = RealFromBits(n.scan.life(hero.handle));
+    char log[240];
+    _snprintf_s(log, sizeof(log), _TRUNCATE,
+        "[AutoRevive] Hero=%u life=%.2f ReviveHero=%d after=%.2f at (%.1f, %.1f).\n",
+        hero.handle, life, accepted, after, hero.x, hero.y);
+    ConsoleLog(log);
+    if (!accepted || after <= 0.405f)
+        ConsoleLog("[AutoRevive] Revive not confirmed; map defeat or custom hero logic may have run.\n");
+}
+
+static void StartAutoReviveImpl(HWND hwnd, bool oneShot) {
+    if (!oneShot) StopAutoRevive(hwnd, nullptr);
+        HMODULE game = GetModuleHandleA("Game.dll");
+        AutoReviveNatives n = {};
+        if (!ResolveAutoReviveNatives(game, n)) {
+            ConsoleLog("[AutoRevive] Unsupported or modified Game.dll; no action.\n"); return;
+        }
+        DWORD player = n.scan.localPlayer();
+        DWORD rect = n.scan.worldBounds();
+        if (!player || !rect) { ConsoleLog("[AutoRevive] No active local player or map.\n"); return; }
+        DWORD group = n.scan.createGroup();
+        if (!group) { n.scan.removeRect(rect); ConsoleLog("[AutoRevive] Could not create unit group.\n"); return; }
+        n.scan.enumRect(group, rect, 0);
+        std::vector<AutoReviveHero> heroes;
+        bool truncated = false;
+        for (size_t i = 0; i < kAutoReviveMaxUnits; ++i) {
+            DWORD unit = n.scan.first(group);
+            if (!unit) break;
+            n.scan.remove(group, unit);
+            if (n.scan.owner(unit) == player) {
+                DWORD typeId = n.scan.typeId(unit);
+                if (typeId && n.isHero(typeId))
+                    heroes.push_back({unit, player, typeId,
+                        RealFromBits(n.x(unit)), RealFromBits(n.y(unit)), false});
+            }
+            if (i + 1 == kAutoReviveMaxUnits && n.scan.first(group)) truncated = true;
+        }
+        n.scan.destroyGroup(group);
+        n.scan.removeRect(rect);
+        if (heroes.empty()) {
+            ConsoleLog("[AutoRevive] No local hero found in world; cannot arm.\n"); return;
+        }
+        for (auto& hero : heroes) TryReviveHero(n, hero);
+        char log[192];
+        _snprintf_s(log, sizeof(log), _TRUNCATE,
+            "[AutoRevive] %s %u local hero(s)%s.\n",
+            oneShot ? "Checked" : "Watching", static_cast<unsigned>(heroes.size()),
+            truncated ? " (scan limit reached)" : "");
+        ConsoleLog(log);
+        if (oneShot) return;
+        g_autoRevive = n;
+        g_autoReviveHeroes.swap(heroes);
+        g_autoReviveGame = game;
+        g_autoRevivePlayer = player;
+        if (!SetTimer(hwnd, kAutoReviveTimer, 50, nullptr))
+            StopAutoRevive(hwnd, "Timer unavailable; stopped.");
+}
+
+static void StartAutoRevive(HWND hwnd, bool oneShot) {
+    __try {
+        StartAutoReviveImpl(hwnd, oneShot);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        StopAutoRevive(hwnd, "Native call failed; stopped.");
+    }
+}
+
+static void StepAutoRevive(HWND hwnd) {
+    if (g_autoReviveHeroes.empty()) return;
+    __try {
+        if (GetModuleHandleA("Game.dll") != g_autoReviveGame ||
+            g_autoRevive.scan.localPlayer() != g_autoRevivePlayer) {
+            StopAutoRevive(hwnd, "Game or local player changed; stopped."); return;
+        }
+        size_t valid = 0;
+        for (auto& hero : g_autoReviveHeroes) {
+            if (!AutoReviveSameHero(g_autoRevive, hero)) continue;
+            ++valid;
+            TryReviveHero(g_autoRevive, hero);
+        }
+        if (!valid) StopAutoRevive(hwnd, "Tracked heroes disappeared; stopped.");
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        StopAutoRevive(hwnd, "Native call failed; stopped.");
     }
 }
 
@@ -1193,12 +1542,35 @@ LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
         return 0;
     }
 
+    if (uMsg == WM_APP + 9) {
+        const ItemRequest* request = reinterpret_cast<const ItemRequest*>(lParam);
+        if (request) AddItemToSelectedUnit(*request);
+        return 0;
+    }
+
+    if (uMsg == WM_APP + 10) {
+        ScanSelectedInventory();
+        return 0;
+    }
+
+    if (uMsg == WM_APP + 11) {
+        if (wParam == 2) StopAutoRevive(hWnd, "Stopped by user.");
+        else StartAutoRevive(hWnd, wParam == 1);
+        return 0;
+    }
+
     if (uMsg == WM_TIMER && wParam == kMassKillTimer) {
         StepMassKill(hWnd);
         return 0;
     }
 
+    if (uMsg == WM_TIMER && wParam == kAutoReviveTimer) {
+        StepAutoRevive(hWnd);
+        return 0;
+    }
+
     if (uMsg == WM_DESTROY && !g_massTargets.empty()) StopMassKill(hWnd, "Window closed.");
+    if (uMsg == WM_DESTROY && !g_autoReviveHeroes.empty()) StopAutoRevive(hWnd, "Window closed.");
 
     if (uMsg == WM_APP + 1) {
         InvokeData* data = (InvokeData*)lParam;
@@ -1255,13 +1627,34 @@ LRESULT CALLBACK HookedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
 void ProcessSingleCommand(const std::string& cmd) {
     if (cmd.empty()) return;
 
-    if (cmd == "LUA_TRACE_START" || cmd == "LUA_TRACE_STOP") {
+    if (cmd == "COMPAT_CHECK") {
+        ReportCompatibility();
+    }
+    else if (cmd == "ITEM_SCAN") {
+        if (g_gameHwnd) SendMessageA(g_gameHwnd, WM_APP + 10, 0, 0);
+        else ConsoleLog("[Inventory] Game window unavailable; scan skipped.\n");
+    }
+    else if (cmd.rfind("ITEM:", 0) == 0) {
+        ItemRequest request{};
+        if (!ParseItemRequest(cmd, request)) {
+            ConsoleLog("[Item] Invalid command. Use ITEM:<four-character ID or 0xHEX>[:slot 1-6].\n");
+        } else if (g_gameHwnd) {
+            SendMessageA(g_gameHwnd, WM_APP + 9, 0, reinterpret_cast<LPARAM>(&request));
+        } else ConsoleLog("[Item] Game window unavailable; no item created.\n");
+    }
+    else if (cmd == "LUA_TRACE_START" || cmd == "LUA_TRACE_STOP") {
         if (g_gameHwnd) SendMessageA(g_gameHwnd, WM_APP + 6, cmd == "LUA_TRACE_STOP", 0);
         else ConsoleLog("[LuaTrace] Game window unavailable; request skipped.\n");
     }
     else if (cmd == "HERO_100M") {
         if (g_gameHwnd) SendMessageA(g_gameHwnd, WM_APP + 7, 0, 0);
         else ConsoleLog("[HeroStats] Game window unavailable; request skipped.\n");
+    }
+    else if (cmd == "REVIVE_LOCAL" || cmd == "AUTO_REVIVE_START" || cmd == "AUTO_REVIVE_STOP") {
+        if (g_gameHwnd)
+            SendMessageA(g_gameHwnd, WM_APP + 11,
+                cmd == "AUTO_REVIVE_STOP" ? 2 : (cmd == "REVIVE_LOCAL" ? 1 : 0), 0);
+        else ConsoleLog("[AutoRevive] Game window unavailable; request skipped.\n");
     }
     else if (cmd == "KILL_ALL_LOCAL" || cmd == "KILL_ALL_STOP") {
         if (g_gameHwnd) SendMessageA(g_gameHwnd, WM_APP + 8, cmd == "KILL_ALL_STOP", 0);
@@ -1485,6 +1878,7 @@ DWORD WINAPI PipeServerThread(LPVOID lpParam) {
         bool connected = ConnectNamedPipe(hPipe, NULL) ? true : (GetLastError() == ERROR_PIPE_CONNECTED);
         if (connected) {
             ConsoleLog("[IPC] Client connected to Named Pipe successfully.\n");
+            ReportCompatibility();
             
             char buffer[4096];
             DWORD bytesRead = 0;
@@ -1591,6 +1985,156 @@ bool MatchesPluginRegistry(HMODULE plugin) {
         nt->OptionalHeader.CheckSum == kDzPluginCheckSum;
 }
 
+struct ModulePeIdentity {
+    DWORD timestamp;
+    DWORD imageSize;
+    DWORD checksum;
+};
+
+bool ReadModulePeIdentity(HMODULE module, ModulePeIdentity& identity) {
+    if (!module) return false;
+    __try {
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0x100000) return false;
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(reinterpret_cast<const BYTE*>(module) + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE || nt->FileHeader.Machine != IMAGE_FILE_MACHINE_I386) return false;
+        identity = {nt->FileHeader.TimeDateStamp, nt->OptionalHeader.SizeOfImage, nt->OptionalHeader.CheckSum};
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool Sha256ModuleFile(HMODULE module, char output[65]) {
+    output[0] = '\0';
+    wchar_t path[MAX_PATH] = {};
+    if (!module || !GetModuleFileNameW(module, path, MAX_PATH)) return false;
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    HCRYPTPROV provider = 0;
+    HCRYPTHASH hash = 0;
+    bool ok = CryptAcquireContextW(&provider, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) != FALSE &&
+              CryptCreateHash(provider, CALG_SHA_256, 0, 0, &hash) != FALSE;
+    BYTE buffer[64 * 1024];
+    DWORD count = 0;
+    while (ok) {
+        if (!ReadFile(file, buffer, sizeof(buffer), &count, nullptr)) { ok = false; break; }
+        if (count == 0) break;
+        if (!CryptHashData(hash, buffer, count, 0)) { ok = false; break; }
+    }
+    BYTE digest[32];
+    DWORD length = sizeof(digest);
+    if (ok) ok = CryptGetHashParam(hash, HP_HASHVAL, digest, &length, 0) != FALSE && length == sizeof(digest);
+    if (hash) CryptDestroyHash(hash);
+    if (provider) CryptReleaseContext(provider, 0);
+    CloseHandle(file);
+    if (!ok) return false;
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < sizeof(digest); ++i) {
+        output[i * 2] = hex[digest[i] >> 4];
+        output[i * 2 + 1] = hex[digest[i] & 15];
+    }
+    output[64] = '\0';
+    return true;
+}
+
+bool HasGameNativeEntry(HMODULE game, DWORD rva, const BYTE* prefix, size_t length) {
+    if (!game) return false;
+    BYTE* entry = reinterpret_cast<BYTE*>(game) + rva;
+    return IsExecutableAddress(entry, length) && memcmp(entry, prefix, length) == 0;
+}
+
+void ReportCompatibility() {
+    HMODULE game = GetModuleHandleA("Game.dll");
+    HMODULE plugin = GetModuleHandleA("War3Plugin.dll");
+    ModulePeIdentity identity{};
+    char sha[65] = {};
+    char log[320];
+    ConsoleLog("[Compat] ===== Version and native status =====\n");
+    if (ReadModulePeIdentity(game, identity)) {
+        _snprintf_s(log, sizeof(log), _TRUNCATE,
+            "[Compat] Game.dll PE timestamp=0x%08X image=0x%X checksum=0x%X match=%s\n",
+            identity.timestamp, identity.imageSize, identity.checksum,
+            identity.timestamp == 0x56bd0e1c && identity.imageSize == 0xcd8000 && identity.checksum == 0xc96841 ? "yes" : "no");
+        ConsoleLog(log);
+        bool hashed = Sha256ModuleFile(game, sha);
+        _snprintf_s(log, sizeof(log), _TRUNCATE, "[Compat] Game.dll disk SHA-256=%s expected=%s match=%s\n",
+            hashed ? sha : "unavailable", kGameDllSha256,
+            hashed ? (_stricmp(sha, kGameDllSha256) == 0 ? "yes" : "no") : "unknown");
+        ConsoleLog(log);
+    } else ConsoleLog("[Compat] Game.dll missing or invalid PE.\n");
+    if (ReadModulePeIdentity(plugin, identity)) {
+        _snprintf_s(log, sizeof(log), _TRUNCATE,
+            "[Compat] War3Plugin.dll PE timestamp=0x%08X image=0x%X checksum=0x%X match=%s\n",
+            identity.timestamp, identity.imageSize, identity.checksum, MatchesPluginRegistry(plugin) ? "yes" : "no");
+        ConsoleLog(log);
+        bool hashed = Sha256ModuleFile(plugin, sha);
+        _snprintf_s(log, sizeof(log), _TRUNCATE, "[Compat] War3Plugin.dll disk SHA-256=%s expected=%s match=%s\n",
+            hashed ? sha : "unavailable", kDzPluginSha256,
+            hashed ? (_stricmp(sha, kDzPluginSha256) == 0 ? "yes" : "no") : "unknown");
+        ConsoleLog(log);
+    } else ConsoleLog("[Compat] War3Plugin.dll missing or invalid PE.\n");
+    LONG pluginMode = InterlockedCompareExchange(&g_pluginResolutionMode, 0, 0);
+    LONG pluginCount = InterlockedCompareExchange(&g_pluginResolutionCount, 0, 0);
+    _snprintf_s(log, sizeof(log), _TRUNCATE,
+        "[Compat] War3Plugin.dll native resolution=%s count=%ld\n",
+        pluginMode == 1 ? "exact-table" : (pluginMode == 2 ? "runtime-parsed" : "waiting-for-registrations"),
+        pluginCount);
+    ConsoleLog(log);
+
+    const BYTE frame[] = {0x55,0x8b,0xec};
+    const BYTE localPrefix[] = {0x56,0x8b,0x35};
+    bool gamePe = ReadModulePeIdentity(game, identity) && identity.timestamp == 0x56bd0e1c &&
+                  identity.imageSize == 0xcd8000 && identity.checksum == 0xc96841;
+    bool selected = FindBlinkNative("DzGetSelectedLeaderUnit", "()Hunit;") != nullptr;
+    bool mouseX = FindBlinkNative("DzGetMouseTerrainX", "()R") != nullptr;
+    bool mouseY = FindBlinkNative("DzGetMouseTerrainY", "()R") != nullptr;
+    bool move = FindBlinkNative("DzSetUnitPosition", "(Hunit;RR)V") != nullptr;
+    bool kill = gamePe && HasGameNativeEntry(game, 0x1efcd0, frame, sizeof(frame));
+    bool itemAdd = gamePe && HasGameNativeEntry(game, 0x1fa7b0, frame, sizeof(frame));
+    bool itemSlot = gamePe && HasGameNativeEntry(game, 0x1faf50, frame, sizeof(frame));
+    bool itemType = gamePe && HasGameNativeEntry(game, 0x1e2cc0, frame, sizeof(frame));
+    bool itemScan = itemSlot && itemType &&
+        HasGameNativeEntry(game, 0x1faee0, frame, sizeof(frame)) &&
+        HasGameNativeEntry(game, 0x1e2c20, frame, sizeof(frame)) &&
+        HasGameNativeEntry(game, 0x1e2be0, frame, sizeof(frame));
+    bool hero = gamePe && HasGameNativeEntry(game, 0x1e6670, frame, sizeof(frame)) &&
+        HasGameNativeEntry(game, 0x1e7b50, frame, sizeof(frame)) &&
+        HasGameNativeEntry(game, 0x1f5890, frame, sizeof(frame)) &&
+        HasGameNativeEntry(game, 0x1f5720, frame, sizeof(frame)) &&
+        HasGameNativeEntry(game, 0x1f5780, frame, sizeof(frame));
+    MassKillNatives mass{};
+    bool killAll = gamePe && ResolveMassKillNatives(game, mass);
+    AutoReviveNatives revive{};
+    bool autoRevive = gamePe && ResolveAutoReviveNatives(game, revive);
+    bool save = FindBlinkNative("DzAPI_Map_SaveServerValue", "(Hplayer;SS)B") != nullptr;
+    _snprintf_s(log, sizeof(log), _TRUNCATE,
+        "[Compat] Native selected=%s mouseX=%s mouseY=%s move=%s save=%s\n",
+        selected ? "ready" : "missing", mouseX ? "ready" : "missing", mouseY ? "ready" : "missing",
+        move ? "ready" : "missing", save ? "ready" : "missing");
+    ConsoleLog(log);
+    _snprintf_s(log, sizeof(log), _TRUNCATE,
+        "[Compat] Native ReviveHero=%s Commands !revive=%s !autorevive=%s active=%s\n",
+        autoRevive ? "ready" : "missing", autoRevive ? "ready" : "waiting",
+        autoRevive ? "ready" : "waiting", g_autoReviveHeroes.empty() ? "no" : "yes");
+    ConsoleLog(log);
+    _snprintf_s(log, sizeof(log), _TRUNCATE,
+        "[Compat] Native KillUnit=%s itemAdd=%s itemSlot=%s itemType=%s itemScan=%s hero=%s killAll=%s\n",
+        kill ? "ready" : "missing", itemAdd ? "ready" : "missing", itemSlot ? "ready" : "missing",
+        itemType ? "ready" : "missing", itemScan ? "ready" : "missing", hero ? "ready" : "missing",
+        killAll ? "ready" : "missing");
+    ConsoleLog(log);
+    _snprintf_s(log, sizeof(log), _TRUNCATE,
+        "[Compat] Commands !kill=%s !item=%s !items=%s !blink=%s !hero100m=%s !killall=%s gameWindow=%s\n",
+        selected && kill ? "ready" : "waiting", selected && itemAdd && itemSlot && itemType ? "ready" : "waiting",
+        selected && itemScan ? "ready" : "waiting", selected && mouseX && mouseY && move ? "ready" : "waiting",
+        selected && hero ? "ready" : "waiting", killAll ? "ready" : "waiting",
+        g_gameHwnd ? "ready" : "missing");
+    ConsoleLog(log);
+    ConsoleLog("[Compat] Ready means required entry points exist; select a unit and verify behavior in the map.\n");
+}
+
 DWORD WINAPI MainThread(LPVOID lpParam) {
     AllocConsole();
     EnsureKeyLock();
@@ -1617,13 +2161,13 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
         hGame = GetModuleHandleA("Game.dll");
         if (!hGame) Sleep(100);
     }
-    if (!hGame) { ConsoleLog("[JassHook] Game.dll did not load within 30 seconds; initialization stopped.\n"); return 1; }
+    if (!hGame) { ConsoleLog("[JassHook] Game.dll did not load within 30 seconds; initialization stopped.\n"); ReportCompatibility(); return 1; }
     const BYTE expectedGameEntry[] = {0x55,0x8b,0xec,0x81,0xec,0x0c,0x01,0x00,0x00};
     void* registerAddress = reinterpret_cast<BYTE*>(hGame) + REGISTER_NATIVE_RVA;
     if (!IsExecutableAddress(registerAddress, 16) || memcmp(registerAddress, expectedGameEntry, sizeof(expectedGameEntry)) != 0) {
-        ConsoleLog("[JassHook] Unsupported or already modified Game.dll register entry; no patch applied.\n"); return 1;
+        ConsoleLog("[JassHook] Unsupported or already modified Game.dll register entry; no patch applied.\n"); ReportCompatibility(); return 1;
     }
-    if (!InstallHook(registerAddress)) { ConsoleLog("[JassHook] Native registration hook installation failed.\n"); return 1; }
+    if (!InstallHook(registerAddress)) { ConsoleLog("[JassHook] Native registration hook installation failed.\n"); ReportCompatibility(); return 1; }
     ConsoleLog("[JassHook] Native registration gateway installed (complete instructions).\n");
 
     HMODULE plugin = nullptr;
@@ -1631,7 +2175,11 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
         plugin = GetModuleHandleA("War3Plugin.dll");
         if (!plugin) Sleep(100);
     }
-    if (plugin && MatchesPluginRegistry(plugin)) {
+    char pluginSha[65] = {};
+    bool pluginHashMatches = plugin && Sha256ModuleFile(plugin, pluginSha) &&
+        _stricmp(pluginSha, kDzPluginSha256) == 0;
+    bool pluginSeeded = false;
+    if (plugin && MatchesPluginRegistry(plugin) && pluginHashMatches) {
         ConsoleLog("[JassHook] Plugin identity verified; loading matching native registry for late injection.\n");
         AcquireSRWLockExclusive(&g_registryLock);
         for (int i = 0; i < g_dzTableCount; ++i) {
@@ -1639,6 +2187,28 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
             if (IsExecutableAddress(handler, 16)) FindOrAddNative(g_dzTable[i].name, g_dzTable[i].sig, handler);
         }
         ReleaseSRWLockExclusive(&g_registryLock);
+        InterlockedExchange(&g_pluginResolutionCount, g_dzTableCount);
+        InterlockedExchange(&g_pluginResolutionMode, 1);
+        pluginSeeded = true;
+    } else if (plugin) {
+        RuntimeDzRegistry resolved;
+        if (ResolveDzNativesFromLoadedPlugin(plugin, resolved)) {
+            AcquireSRWLockExclusive(&g_registryLock);
+            for (const auto& native : resolved.natives)
+                if (IsExecutableAddress(native.handler, 16))
+                    FindOrAddNative(native.name, native.signature, native.handler);
+            ReleaseSRWLockExclusive(&g_registryLock);
+            char log[200];
+            _snprintf_s(log, sizeof(log), _TRUNCATE,
+                "[JassHook] Plugin changed; runtime parsed %u natives (%u direct, %u table), registrar RVA=0x%X.\n",
+                static_cast<unsigned>(resolved.natives.size()), resolved.direct, resolved.table, resolved.registrarRva);
+            ConsoleLog(log);
+            InterlockedExchange(&g_pluginResolutionCount, static_cast<LONG>(resolved.natives.size()));
+            InterlockedExchange(&g_pluginResolutionMode, 2);
+            pluginSeeded = true;
+        }
+    }
+    if (pluginSeeded) {
         InstallSpoofHook("DzAPI_Map_GetMapLevel", reinterpret_cast<void*>(Spoof_LevelDynamic));
         InstallTrampolineHook("DzAPI_Map_HasMallItem", reinterpret_cast<void*>(Monitor_HasMallItem), hkHasMallItem);
         InstallTrampolineHook("DzAPI_Map_SaveServerValue", reinterpret_cast<void*>(Monitor_SaveServerValue), hkSave);
@@ -1650,7 +2220,7 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
         InstallTrampolineHook("DzAPI_Map_GetServerArchiveEquip", reinterpret_cast<void*>(Monitor_GetServerArchiveEquip), hkGetServerArchiveEquip);
         InstallTrampolineHook("DzAPI_Map_GetServerArchiveDrop", reinterpret_cast<void*>(Monitor_GetServerArchiveDrop), hkGetServerArchiveDrop);
     } else {
-        ConsoleLog(plugin ? "[JassHook] Unrecognized War3Plugin.dll version; static offsets disabled. Load a map to capture real native registrations.\n"
+        ConsoleLog(plugin ? "[JassHook] War3Plugin.dll changed and runtime registration layout was not verified; wait for real native registrations on map load.\n"
             : "[JassHook] War3Plugin.dll not loaded; waiting for actual native registrations on map load.\n");
     }
     EnumData edata = {GetCurrentProcessId(), NULL};
@@ -1669,6 +2239,7 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
             ConsoleLog("[JassHook] Game window connected; initialization ready.\n");
         }
     } else ConsoleLog("[JassHook] Game window not found; game-thread commands unavailable.\n");
+    ReportCompatibility();
     return 0;
 }
 

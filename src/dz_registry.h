@@ -2,14 +2,14 @@
 // Verified PE32 registrations: 458 direct + 59 table = 517 unique natives.
 // Text SHA-256 covers .text VirtualSize bytes on disk, before relocations/hooks.
 #pragma once
-static constexpr unsigned kDzPluginTimeDateStamp = 0x6adec7ce;
+static constexpr unsigned kDzPluginTimeDateStamp = 0x6aead56b;
 static constexpr unsigned kDzPluginSizeOfImage = 0x28b000;
-static constexpr unsigned kDzPluginCheckSum = 0x285690;
+static constexpr unsigned kDzPluginCheckSum = 0x28723d;
 static constexpr unsigned kDzPluginTextRva = 0x1000;
 static constexpr unsigned kDzPluginTextSize = 0x205b3c;
 static constexpr unsigned kDzPluginRegistrarRva = 0xe8090;
-static constexpr char kDzPluginSha256[] = "eb4b094faf58d9ec4b461f552d79184cd4b2283711c232b14ec03d5ad4224d4f";
-static constexpr char kDzPluginTextSha256[] = "630f2c941b31a8142bff850774d9747713f1c7e6aa3bc956dc28b63a09204c59";
+static constexpr char kDzPluginSha256[] = "c869ea4cc55e23ded1ddd51a0ad24bf3c5b8ca164340ffe913a971907621b120";
+static constexpr char kDzPluginTextSha256[] = "29ab397f44910eb0882cc662e9f0e6fbfd10b9b3a03163aae6e3acc84ee6d1ce";
 struct DzEntry { const char* name; const char* sig; unsigned rva; };
 static const DzEntry g_dzTable[] = {
     {"DzEvent_Building_Cancel", "(Hplayer;Hunit;)V", 0x137c0},

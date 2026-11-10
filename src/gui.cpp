@@ -1110,6 +1110,33 @@ void ProcessUserCommand(const std::string& cmd) {
         if (SendPipeCommand(c == "!killall" ? "KILL_ALL_LOCAL" : "KILL_ALL_STOP"))
             AppendLog(c == "!killall" ? L"[+] 已開始分批擊殺全圖敵對單位" : L"[+] 已取消全圖擊殺");
     }
+    else if (c == "!revive" || c == "!autorevive" || c == "!autorevive stop") {
+        const char* command = c == "!revive" ? "REVIVE_LOCAL" :
+            (c == "!autorevive" ? "AUTO_REVIVE_START" : "AUTO_REVIVE_STOP");
+        if (SendPipeCommand(command))
+            AppendLog(c == "!revive" ? L"[AutoRevive] 已請求立即復活本機英雄；請查看日誌。" :
+                (c == "!autorevive" ? L"[AutoRevive] 已請求監看本機英雄。" : L"[AutoRevive] 已請求停止監看。"));
+        else AppendLog(L"[-] 管道未連線，請先注入 DLL。");
+    }
+    else if (c == "!item" || c.rfind("!item ", 0) == 0) {
+        std::istringstream args(c.substr(5));
+        std::string id, slot, extra;
+        if (!(args >> id) || (args >> slot && (args >> extra))) {
+            AppendLog(L"[-] 用法: !item <四字元物品ID或0x十六進位ID> [空格1-6]");
+        } else if (SendPipeCommand("ITEM:" + id + (slot.empty() ? "" : ":" + slot))) {
+            AppendLog(L"[Item] 已送出物品建立請求；請查看遊戲物品欄與 dztrace.log 的結果。");
+        } else AppendLog(L"[-] 管道未連線，請先注入 DLL。");
+    }
+    else if (c == "!items") {
+        if (SendPipeCommand("ITEM_SCAN"))
+            AppendLog(L"[Inventory] 已送出物品欄掃描；結果會出現在即時日誌。");
+        else AppendLog(L"[-] 管道未連線，請先注入 DLL。");
+    }
+    else if (c == "!compat") {
+        if (SendPipeCommand("COMPAT_CHECK"))
+            AppendLog(L"[Compat] 已要求重新檢查；請查看即時日誌的 [Compat] 行。");
+        else AppendLog(L"[-] 管道未連線，請先注入 DLL。");
+    }
     else if (c == "!panel") {
         GenerateAndOpenPanel();
     }
@@ -1612,7 +1639,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             WS_CHILD | SS_LEFT, 490, 328, 395, 20, hWnd, NULL, NULL, NULL));
 
         // Right Panel: 6 Item Slots Groupbox
-        HWND hGrpItems = addTab1(CreateWindowW(L"BUTTON", L"【英雄物品欄 6 格使用次數 (Charges) 修改】", WS_CHILD | BS_GROUPBOX,
+        HWND hGrpItems = addTab1(CreateWindowW(L"BUTTON", L"【英雄物品欄 6 格掃描與使用次數修改】", WS_CHILD | BS_GROUPBOX,
             474, 370, 428, 343, hWnd, NULL, NULL, NULL));
         SendMessage(hGrpItems, WM_SETFONT, (WPARAM)g_hFontBold, TRUE);
 
@@ -1629,6 +1656,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
         addTab1(CreateWindowW(L"STATIC", L"💡 物品說明: 支援消耗品、充能神器或具使用次數的道具。\n若裝備本身無次數屬性，修改可能不會顯示變化。",
             WS_CHILD | SS_LEFT, 490, 622, 395, 45, hWnd, NULL, NULL, NULL));
+
+        addTab1(CreateWindowW(L"BUTTON", L"🔎 掃描六格物品 ID", WS_CHILD | BS_PUSHBUTTON,
+            680, 673, 205, 28, hWnd, (HMENU)IDC_BTN_SCAN_ITEM_IDS, NULL, NULL));
 
         addTab1(CreateWindowW(L"STATIC", L"💡 記憶體模組: Game.dll 偏移引擎已就緒 | 支援單機、RPG自定義地圖",
             WS_CHILD | SS_LEFT, 28, 724, 870, 20, hWnd, NULL, NULL, NULL));
@@ -1776,8 +1806,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         HWND hBtnOpenSave = addTab3(CreateWindowW(L"BUTTON", L"📂 開啟 local_save.txt", WS_CHILD | BS_PUSHBUTTON,
             530, 688, 150, 28, hWnd, (HMENU)IDC_BTN_OPEN_LOCALSAVE, NULL, NULL));
 
-        addTab3(CreateWindowW(L"STATIC", L"💡 日誌即時串流 JassHook 內部 Native 攔截與 Named Pipe 雙向通訊",
-            WS_CHILD | SS_LEFT, 690, 693, 200, 20, hWnd, NULL, NULL, NULL));
+        addTab3(CreateWindowW(L"BUTTON", L"🔍 版本相容性檢查", WS_CHILD | BS_PUSHBUTTON,
+            690, 688, 198, 28, hWnd, (HMENU)IDC_BTN_COMPAT_CHECK, NULL, NULL));
 
         // Ensure Tab 0 is initially visible and other tabs are hidden
         SwitchMainTab();
@@ -2274,6 +2304,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             AppendLog(L"[WebController] 物品欄格 " + std::to_wstring(slot + 1) + L" 次數已修改為 " + std::wstring(buf));
             break;
         }
+
+        case IDC_BTN_SCAN_ITEM_IDS:
+            if (SendPipeCommand("ITEM_SCAN"))
+                AppendLog(L"[Inventory] 已送出物品欄掃描；請查看即時日誌的 [Inventory] 行。");
+            else AppendLog(L"[-] 物品欄掃描失敗：請先注入 DLL 並連線。");
+            break;
+
+        case IDC_BTN_COMPAT_CHECK:
+            if (SendPipeCommand("COMPAT_CHECK"))
+                AppendLog(L"[Compat] 已要求重新檢查；請查看即時日誌的 [Compat] 行。");
+            else AppendLog(L"[-] 相容性檢查失敗：請先注入 DLL 並連線。");
+            break;
 
         case IDC_BTN_SEND_CMD: {
             wchar_t buf[512];

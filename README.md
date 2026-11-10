@@ -25,6 +25,18 @@ Warcraft III 1.27（x86）的本機開發工具。專案提供注入 DLL、Windo
 
 需要 Windows、CMake 3.15 以上，以及具備 x86 C++ 工具鏈的 Visual Studio。必須以 **Win32** 架構建置。
 
+雙擊 `scripts\update_and_build.bat` 可一鍵更新 `origin/main`、讀取 KK 對戰平台目前安裝的 `War3Plugin.dll`、重新產生 DzAPI 版本對應表、編譯並安裝 x86 Release 套件，最後執行回歸測試。也可在命令列執行：
+
+```bat
+scripts\update_and_build.bat --no-pause
+```
+
+預設插件路徑為專案旁的 `kkduizhan\plugins\Game\War3Plugin.dll`。若平台安裝在別處，先設定 `WAR3_PLUGIN_PATH` 為該 DLL 的完整路徑。插件由 KK 平台更新；腳本使用已安裝的版本，不會從未經驗證的網站下載 DLL。需要 Python 3 與 `pefile`、`capstone`（`python -m pip install pefile capstone`）。更新後請重新啟動遊戲並注入新的 `JassHook.dll`。
+
+新版 DLL 也會在啟動時解析已載入的 `War3Plugin.dll`。KK 更新插件後，只要 Native 名稱、簽名與已驗證的註冊結構仍相容，就不必為了新指紋重新編譯。進圖後用 `!compat` 查看 `native resolution=runtime-parsed` 與個別 Native 的 `ready` 狀態；插件大幅改版時解析器會拒絕不確定的結果。
+
+只編譯目前原始碼、不更新 Git 或插件對應表時，執行：
+
 ```bat
 scripts\build.bat --no-pause
 ```
@@ -54,8 +66,21 @@ ctest --test-dir build -C Release --output-on-failure
 | 取消尚未執行的全圖擊殺 | `Ctrl+Shift+X` | `!killall stop` |
 | 選取單位閃現到滑鼠地面位置 | `Ctrl+B` | GUI 的閃現準備按鈕 |
 | 選取英雄三屬性各設為一億 | `Ctrl+H` | `!hero100m` |
+| 立即嘗試復活本機已死亡英雄 | — | `!revive` |
+| 監看並嘗試復活本機英雄 | — | `!autorevive`；`!autorevive stop` 關閉 |
+| 在選取角色物品欄建立指定物品 | — | `!item I000` 或 `!item I000 2`（第 2 格） |
+| 掃描選取角色六格物品 ID | — | `!items`，或 GUI「掃描六格物品 ID」 |
+| 版本相容性檢查 | — | `!compat`，或 GUI「版本相容性檢查」 |
 
 控制台另提供 `!panel`、`!saveall`、`!save <玩家 handle> <Key> <Value>`、`!mall <0..3>`、`!percent <1..100>`、`!reload` 與 `!luatrace`。輸入 `!help` 可查看當前指令清單。GUI 可讀取存檔快取、保存 `.w3snapshot` 並產生差異報告；[存檔差異說明](diagnostics/save-diff-usage.md)列出比較範圍。
+
+`!item` 接受地圖中的四字元物品 rawcode 或 `0x` 開頭的八位十六進位 ID；未指定格數時選第一個空格，不會覆蓋已有物品。執行結果寫入 `bin/dztrace.log`。物品 ID 必須存在於當前地圖；本機建立物品不代表平台存檔會記錄它，連線遊戲也可能不同步。實作與驗證範圍見[指定物品研究](diagnostics/item-spawn.md)。
+
+`!items` 會透過遊戲 Native 讀取選取角色的物品欄，列出每格的四字元 ID、十六進位 ID、名稱與使用次數；結果顯示在 GUI 即時日誌或 CLI，並寫入 `bin/dztrace.log`。空格會標示 `empty`。名稱若無法從遊戲字串池解碼，會顯示 `(unavailable)`。
+
+`!autorevive` 請在本機英雄仍存活時啟用；它每次死亡只嘗試一次 `ReviveHero`，`!autorevive stop` 可關閉。`!revive` 是單次嘗試。此功能只改本機遊戲狀態；地圖若已觸發全員死亡失敗或已移除英雄，復活可能失敗，也可能無法讓遊戲繼續。詳見[本機復活的實作與限制](diagnostics/all-dead-local-revive.md)。
+
+DLL 啟動及 GUI／CLI 連線時會在即時日誌輸出 `[Compat]` 報告，列出 `Game.dll`、`War3Plugin.dll` 的 PE 指紋、磁碟檔 SHA-256 與所需 Native 的就緒狀態。進圖後可用 `!compat` 重新檢查。`ready` 僅表示必要入口存在；是否能在目前地圖使用，仍需實際操作確認。詳見[相容性檢查說明](diagnostics/compatibility-check.md)。
 
 存檔讀取來自 DzAPI 插件快取；寫入 Native 回傳成功也不保證平台已持久化，詳見[存檔讀寫研究](diagnostics/save-io-research.md)。全圖擊殺只在本機執行，連線對戰可能不同步，也不會重置地圖的一次性掉落或存檔旗標，詳見[擊殺功能說明](diagnostics/hero-stats-and-mass-kill.md)。
 

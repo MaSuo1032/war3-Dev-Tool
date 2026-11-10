@@ -103,8 +103,58 @@ void TestGuardedStringsAndPluginIdentity() {
     nt->OptionalHeader.SizeOfImage = kDzPluginSizeOfImage;
     nt->OptionalHeader.CheckSum = kDzPluginCheckSum;
     CHECK(MatchesPluginRegistry(reinterpret_cast<HMODULE>(headers)));
+    ModulePeIdentity identity{};
+    CHECK(ReadModulePeIdentity(reinterpret_cast<HMODULE>(headers), identity));
+    CHECK(identity.timestamp == kDzPluginTimeDateStamp && identity.imageSize == kDzPluginSizeOfImage);
     ++nt->FileHeader.TimeDateStamp;
     CHECK(!MatchesPluginRegistry(reinterpret_cast<HMODULE>(headers)));
+    char sha[65] = {};
+    CHECK(Sha256ModuleFile(GetModuleHandleW(nullptr), sha));
+    CHECK(strlen(sha) == 64);
+}
+
+void TestRuntimePluginResolution() {
+    wchar_t path[MAX_PATH] = {};
+    if (!GetFullPathNameW(L"..\\..\\kkduizhan\\plugins\\Game\\War3Plugin.dll", MAX_PATH, path, nullptr) ||
+        GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) return;
+    HMODULE plugin = LoadLibraryExW(path, nullptr, DONT_RESOLVE_DLL_REFERENCES);
+    CHECK(plugin != nullptr);
+    if (!plugin) return;
+    RuntimeDzRegistry registry;
+    CHECK(ResolveDzNativesFromLoadedPlugin(plugin, registry));
+    std::cout << "Runtime plugin scan: " << registry.natives.size() << " natives ("
+              << registry.direct << " direct, " << registry.table << " table).\n";
+    CHECK(registry.natives.size() >= 450);
+    CHECK(registry.direct >= 300);
+    auto has = [&](const char* name, const char* signature) {
+        for (const auto& native : registry.natives)
+            if (strcmp(native.name, name) == 0 && strcmp(native.signature, signature) == 0)
+                return true;
+        return false;
+    };
+    for (int i = 0; i < g_dzTableCount; ++i)
+        if (!has(g_dzTable[i].name, g_dzTable[i].sig))
+            std::cout << "Runtime scan omitted: " << g_dzTable[i].name << "\n";
+    CHECK(has("DzGetSelectedLeaderUnit", "()Hunit;"));
+    CHECK(has("DzGetMouseTerrainX", "()R"));
+    CHECK(has("DzGetMouseTerrainY", "()R"));
+    CHECK(has("DzSetUnitPosition", "(Hunit;RR)V"));
+    CHECK(has("DzAPI_Map_SaveServerValue", "(Hplayer;SS)B"));
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(plugin);
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS32*>(reinterpret_cast<BYTE*>(plugin) + dos->e_lfanew);
+    DWORD oldProtect = 0;
+    if (VirtualProtect(nt, sizeof(*nt), PAGE_READWRITE, &oldProtect)) {
+        DWORD timestamp = nt->FileHeader.TimeDateStamp;
+        nt->FileHeader.TimeDateStamp = kDzPluginTimeDateStamp ^ 0xffffffffu;
+        CHECK(!MatchesPluginRegistry(plugin));
+        RuntimeDzRegistry changedIdentity;
+        CHECK(ResolveDzNativesFromLoadedPlugin(plugin, changedIdentity));
+        CHECK(changedIdentity.natives.size() == registry.natives.size());
+        nt->FileHeader.TimeDateStamp = timestamp;
+        DWORD ignored = 0;
+        VirtualProtect(nt, sizeof(*nt), oldProtect, &ignored);
+    }
+    FreeLibrary(plugin);
 }
 
 void TestInstructionBoundariesAndGateway() {
@@ -170,6 +220,48 @@ void TestMassKillFilter() {
     testOwner = 9; CHECK(!MassKillEligible(natives, target, 1)); testOwner = 8;
     CHECK(!MassKillEligible(natives, {0, 8, 77}, 1));
 }
+static int reviveCalls = 0;
+static int reviveAccepted = 1;
+static float reviveX = 120.0f, reviveY = 220.0f;
+DWORD __cdecl TestReviveX(DWORD) { DWORD bits; memcpy(&bits, &reviveX, 4); return bits; }
+DWORD __cdecl TestReviveY(DWORD) { DWORD bits; memcpy(&bits, &reviveY, 4); return bits; }
+int __cdecl TestHeroType(DWORD type) { return type == 77; }
+int __cdecl TestRevive(DWORD unit, const float* x, const float* y, int effect) {
+    CHECK(unit == 123 && *x == 120.0f && *y == 220.0f && effect == TRUE);
+    ++reviveCalls;
+    if (reviveAccepted) testLife = 50.0f;
+    return reviveAccepted;
+}
+void TestLocalAutoRevive() {
+    AutoReviveNatives natives = {};
+    natives.scan.typeId = TestMassType;
+    natives.scan.owner = TestMassOwner;
+    natives.scan.life = TestMassLife;
+    natives.x = TestReviveX;
+    natives.y = TestReviveY;
+    natives.isHero = TestHeroType;
+    natives.revive = TestRevive;
+    AutoReviveHero hero = {123, 8, 77, 100.0f, 200.0f, false};
+    testLife = 100.0f;
+    TryReviveHero(natives, hero);
+    CHECK(reviveCalls == 0 && !hero.attempted && hero.x == 120.0f && hero.y == 220.0f);
+    testLife = 0.0f;
+    TryReviveHero(natives, hero);
+    CHECK(reviveCalls == 1 && hero.attempted && testLife == 50.0f);
+    TryReviveHero(natives, hero);
+    CHECK(reviveCalls == 1 && !hero.attempted);
+    reviveAccepted = 0;
+    testLife = 0.0f;
+    TryReviveHero(natives, hero);
+    TryReviveHero(natives, hero);
+    CHECK(reviveCalls == 2 && hero.attempted && testLife == 0.0f);
+    testOwner = 9;
+    hero.attempted = false;
+    TryReviveHero(natives, hero);
+    CHECK(reviveCalls == 2);
+    testOwner = 8;
+    testLife = 100.0f;
+}
 static float blinkX = 0, blinkY = 456;
 static int blinkCalls = 0;
 DWORD __cdecl TestSelected() { return blinkUnit; }
@@ -191,6 +283,19 @@ void TestBlink() {
     BlinkSelectedUnit(-1, -1); CHECK(g_blinkArmed && blinkCalls == 1);
 }
 
+void TestItemCommand() {
+    ItemRequest request{};
+    CHECK(ParseItemRequest("ITEM:I000:2", request));
+    CHECK(request.typeId == 0x49303030 && request.slot == 1);
+    CHECK(ParseItemRequest("ITEM:0x49303030", request));
+    CHECK(request.typeId == 0x49303030 && request.slot == -1);
+    CHECK(ParseItemRequest("ITEM:1227894832:6", request));
+    CHECK(request.typeId == 0x49303030 && request.slot == 5);
+    for (const char* invalid : {"ITEM:", "ITEM:0x4930303", "ITEM:0xGG303030", "ITEM:I000:0",
+                                "ITEM:I000:7", "ITEM:I000:1:2", "ITEM:4294967296", "ITEM:0"})
+        CHECK(!ParseItemRequest(invalid, request));
+}
+
 int main() {
     wchar_t current[MAX_PATH];
     if (GetCurrentDirectoryW(MAX_PATH, current)) wcscpy_s(g_DllDirectory, current);
@@ -198,9 +303,12 @@ int main() {
     TestRegistryBounds();
     TestInstructionBoundariesAndGateway();
     TestGuardedStringsAndPluginIdentity();
+    TestRuntimePluginResolution();
     TestBlink();
     TestKillDispatch();
     TestMassKillFilter();
+    TestLocalAutoRevive();
+    TestItemCommand();
     if (failures) return 1;
     std::cout << "Hook regression passed: stack alignment, immutable thunks, registry capacity, full-instruction gateways.\n";
     return 0;

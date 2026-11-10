@@ -116,6 +116,8 @@
 #define IDC_BTN_ADD_UNIT_INT      1124
 #define IDC_BTN_ADD_UNIT_EXP      1125
 #define IDC_BTN_MEM_BLINK         1126
+#define IDC_BTN_SCAN_ITEM_IDS     1127
+#define IDC_BTN_COMPAT_CHECK      1128
 
 #define IDT_TIMER_STATUS          1
 #define IDT_TIMER_AUTO_INJECT     2

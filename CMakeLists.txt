@@ -35,7 +35,7 @@ add_executable(War3JassDevTool
 add_library(JassHook SHARED
     src/JassHook.cpp
 )
-target_link_libraries(JassHook PRIVATE user32 kernel32)
+target_link_libraries(JassHook PRIVATE user32 kernel32 advapi32)
 
 # 3. Injector
 add_executable(Injector
@@ -68,7 +68,7 @@ install(SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/InstallDefaults.cmake"
 include(CTest)
 if(BUILD_TESTING)
     add_executable(HookRegression tests/hook_regression.cpp)
-    target_link_libraries(HookRegression PRIVATE user32 kernel32)
+    target_link_libraries(HookRegression PRIVATE user32 kernel32 advapi32)
     add_test(NAME hook_regression COMMAND HookRegression)
 
     add_library(InjectorPayload SHARED tests/injector_payload.cpp)
